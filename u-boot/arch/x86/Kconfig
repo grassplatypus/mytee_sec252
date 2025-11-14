@@ -96,27 +96,6 @@ config INTEL_MID
 	  chipset which consume less power than most of the x86
 	  derivatives.
 
-# board-specific options below
-source "board/advantech/Kconfig"
-source "board/congatec/Kconfig"
-source "board/coreboot/Kconfig"
-source "board/dfi/Kconfig"
-source "board/efi/Kconfig"
-source "board/emulation/Kconfig"
-source "board/google/Kconfig"
-source "board/intel/Kconfig"
-
-# platform-specific options below
-source "arch/x86/cpu/baytrail/Kconfig"
-source "arch/x86/cpu/braswell/Kconfig"
-source "arch/x86/cpu/broadwell/Kconfig"
-source "arch/x86/cpu/coreboot/Kconfig"
-source "arch/x86/cpu/ivybridge/Kconfig"
-source "arch/x86/cpu/efi/Kconfig"
-source "arch/x86/cpu/qemu/Kconfig"
-source "arch/x86/cpu/quark/Kconfig"
-source "arch/x86/cpu/queensbay/Kconfig"
-source "arch/x86/cpu/tangier/Kconfig"
 
 # architecture-specific options below
 

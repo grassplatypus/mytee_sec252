@@ -1,7 +1,6 @@
 # Makefile for Embedded Linux TPM Toolbox 2 (ELTT2)
 # Copyright (c) Infineon Technologies AG
-
-CC=/PATH/TO/YOUR/TOOLCHAINS/AARCH32/bin/arm-linux-gnueabihf-gcc
+CC = /home/dreams200260/mytee/toolchains/AARCH32/bin/arm-linux-gnueabihf-gcc
 CFLAGS=-Wall -Wextra -std=c99 -g
 
 all: eltt2
