@@ -13,7 +13,7 @@ toolchains/
 *.a
 *.bin
 *.cfgout
-*.dtb
+#*.dtb
 *.dtb.S
 *.elf
 *.exe
