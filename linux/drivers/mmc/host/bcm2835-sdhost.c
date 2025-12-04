@@ -240,6 +240,14 @@ static void __iomem *timer_base;
 #define LOG_ENTRIES (256*1)
 #define LOG_SIZE (sizeof(LOG_ENTRY_T)*LOG_ENTRIES)
 
+/**
+ * log_init - allocate and initialise the SD host debug ring buffer
+ * @dev: device pointer used for DMA coherent allocation
+ * @bus_to_phys: mapped bus base to locate timer registers for timestamps
+ *
+ * Allocates a coherent DMA memory buffer for storing recent events
+ * which aids debugging. Also maps a timer register base for timestamping.
+ */
 static void log_init(struct device *dev, u32 bus_to_phys)
 {
 	spin_lock_init(&log_lock);
@@ -256,6 +264,14 @@ static void log_init(struct device *dev, u32 bus_to_phys)
 		pr_err("sdhost: failed to allocate log buf\n");
 }
 
+/**
+ * log_event_impl - store debug event in ring log buffer
+ * @event: 4 byte event ID string
+ * @param1: event-specific parameter 1 (32-bit)
+ * @param2: event-specific parameter 2 (32-bit)
+ *
+ * Helper used to write a timestamped event to the ring buffer.
+ */
 static void log_event_impl(const char *event, u32 param1, u32 param2)
 {
 	if (sdhost_log_buf) {
@@ -276,6 +292,12 @@ static void log_event_impl(const char *event, u32 param1, u32 param2)
 	}
 }
 
+/**
+ * log_dump - print the content of the debug ring buffer
+ *
+ * Iterate and print stored debug events, timestamps and params to
+ * assist post-mortem debugging.
+ */
 static void log_dump(void)
 {
 	if (sdhost_log_buf) {
@@ -311,21 +333,55 @@ static void log_dump(void)
 
 #endif
 
+/**
+ * bcm2835_sdhost_write - write 32-bit value to host register
+ * @host: pointer to bcm2835_host struct
+ * @val: value to write to register
+ * @reg: register offset to write the value
+ *
+ * Write a 32-bit value to the host controller's MMIO region at the
+ * provided offset. Wrapper around writel() for readability.
+ */
 static inline void bcm2835_sdhost_write(struct bcm2835_host *host, u32 val, int reg)
 {
 	writel(val, host->ioaddr + reg);
 }
 
+/**
+ * bcm2835_sdhost_read - read 32-bit value from host register
+ * @host: pointer to bcm2835_host struct
+ * @reg: register offset to read from
+ *
+ * Read a 32-bit value from the host controller's MMIO region at the
+ * provided offset. Wrapper around readl() for readability.
+ */
 static inline u32 bcm2835_sdhost_read(struct bcm2835_host *host, int reg)
 {
 	return readl(host->ioaddr + reg);
 }
 
+/**
+ * bcm2835_sdhost_read_relaxed - relaxed read from host register
+ * @host: pointer to bcm2835_host struct
+ * @reg: register offset to read from
+ *
+ * Similar to bcm2835_sdhost_read() but uses the relaxed variant to avoid
+ * ordering barriers when safe to do so.
+ */
 static inline u32 bcm2835_sdhost_read_relaxed(struct bcm2835_host *host, int reg)
 {
 	return readl_relaxed(host->ioaddr + reg);
 }
 
+/**
+ * bcm2835_sdhost_dumpcmd - helper to print command state for debugging
+ * @host: pointer to bcm2835_host struct
+ * @cmd: mmc_command to dump information for
+ * @label: label to prefix the printed message
+ *
+ * Prints opcode/arguments/flags and response registers for an MMC
+ * command for use in debugging scenarios.
+ */
 static void bcm2835_sdhost_dumpcmd(struct bcm2835_host *host,
 				   struct mmc_command *cmd,
 				   const char *label)
@@ -339,6 +395,13 @@ static void bcm2835_sdhost_dumpcmd(struct bcm2835_host *host,
 			cmd->error);
 }
 
+/**
+ * bcm2835_sdhost_dumpregs - dump controller registers to kernel log
+ * @host: pointer to bcm2835_host struct
+ *
+ * Prints the values of the main SD host registers and the current
+ * request/command state to help diagnose hardware problems.
+ */
 static void bcm2835_sdhost_dumpregs(struct bcm2835_host *host)
 {
 	if (host->mrq)
@@ -404,11 +467,25 @@ static void bcm2835_sdhost_dumpregs(struct bcm2835_host *host)
 		mmc_hostname(host->mmc));
 }
 
+/**
+ * bcm2835_sdhost_set_power - set the SD card power state
+ * @host: pointer to bcm2835_host struct
+ * @on: boolean indicating whether to turn power on (true) or off (false)
+ *
+ * Manipulates the SDVDD register to turn the card power rail on or off.
+ */
 static void bcm2835_sdhost_set_power(struct bcm2835_host *host, bool on)
 {
 	bcm2835_sdhost_write(host, on ? 1 : 0, SDVDD);
 }
 
+/**
+ * bcm2835_sdhost_reset_internal - internal controller reset routine
+ * @host: pointer to bcm2835_host struct
+ *
+ * Performs a hardware reset flow including clearing registers and
+ * reinitialising defaults. This may be used at probe and error recovery.
+ */
 static void bcm2835_sdhost_reset_internal(struct bcm2835_host *host)
 {
 	u32 temp;
@@ -444,6 +521,13 @@ static void bcm2835_sdhost_reset_internal(struct bcm2835_host *host)
 	mmiowb();
 }
 
+/**
+ * bcm2835_sdhost_reset - mmc_host reset wrapper
+ * @mmc: mmc_host representing this host controller
+ *
+ * Wrapper invoked via mmc_host ops that calls the internal reset under
+ * the host lock.
+ */
 static void bcm2835_sdhost_reset(struct mmc_host *mmc)
 {
 	struct bcm2835_host *host = mmc_priv(mmc);
@@ -456,8 +540,24 @@ static void bcm2835_sdhost_reset(struct mmc_host *mmc)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+/**
+ * bcm2835_sdhost_set_ios - set IO configuration for the host
+ * @mmc: mmc_host pointer for this controller
+ * @ios: requested IO settings (clock, bus width, timing, voltage, drv_type)
+ *
+ * Prototypes the I/O configuration routine which is called by mmc core
+ * in order to change the host configuration at runtime.
+ */
 static void bcm2835_sdhost_set_ios(struct mmc_host *mmc, struct mmc_ios *ios);
 
+/**
+ * bcm2835_sdhost_init - initialises or reinitialises the SD host
+ * @host: pointer to bcm2835_host struct
+ * @soft: non-zero indicates a soft init (preserve power state)
+ *
+ * Sets default hcfg IRQ bits and resets internal state, performing a
+ * soft reinitialisation if requested.
+ */
 static void bcm2835_sdhost_init(struct bcm2835_host *host, int soft)
 {
 	pr_debug("bcm2835_sdhost_init(%d)\n", soft);
@@ -474,6 +574,14 @@ static void bcm2835_sdhost_init(struct bcm2835_host *host, int soft)
 	}
 }
 
+/**
+ * bcm2835_sdhost_wait_transfer_complete - block until hardware reports completion
+ * @host: pointer to bcm2835_host struct
+ *
+ * Poll the SDEDM FSM bits to wait for the data transfer to return to
+ * an idle state or alternative idle state. Used to ensure proper
+ * ordering of commands and data completion.
+ */
 static void bcm2835_sdhost_wait_transfer_complete(struct bcm2835_host *host)
 {
 	int timediff;
@@ -743,6 +851,13 @@ static void bcm2835_sdhost_write_block_pio(struct bcm2835_host *host)
 	local_irq_restore(flags);
 }
 
+/**
+ * bcm2835_sdhost_transfer_pio - handle a PIO data transfer for the active request
+ * @host: pointer to bcm2835_host struct
+ *
+ * Low-level orchestration for PIO transfers: determine read vs write and
+ * drive block-level PIO routines until the transfer finishes or errors.
+ */
 static void bcm2835_sdhost_transfer_pio(struct bcm2835_host *host)
 {
 	u32 sdhsts;
@@ -776,6 +891,15 @@ static void bcm2835_sdhost_transfer_pio(struct bcm2835_host *host)
 	log_event("XFP>", (u32)host->data, host->blocks);
 }
 
+/**
+ * bcm2835_sdhost_prepare_dma - prepare a DMA transaction for MMC data
+ * @host: pointer to bcm2835_host struct
+ * @data: mmc_data pointer describing the transfer's SG list and flags
+ *
+ * Maps scatterlist entries for DMA, sets up the DMA slave config for
+ * Tx/Rx, trims the final SG element if required due to FIFO issues and
+ * prepares a dma_async_tx_descriptor.
+ */
 static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 	struct mmc_data *data)
 {
@@ -784,7 +908,7 @@ static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 	struct dma_chan *dma_chan;
 
 	log_event("PRD<", (u32)data, 0);
-	pr_debug("bcm2835_sdhost_prepare_dma()\n");
+	pr_info("bcm2835_sdhost_prepare_dma()\n"); // 로그 출력하도록 변경
 
 	dma_chan = host->dma_chan_rxtx;
 	if (data->flags & MMC_DATA_READ) {
@@ -853,6 +977,13 @@ static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 	log_event("PDM>", (u32)data, 0);
 }
 
+/**
+ * bcm2835_sdhost_start_dma - submit prepared descriptor and kick DMA
+ * @host: pointer to bcm2835_host struct
+ *
+ * Submits a prepared dma_async_tx_descriptor to the dmaengine and
+ * triggers the DMA channel for the active transfer.
+ */
 static void bcm2835_sdhost_start_dma(struct bcm2835_host *host)
 {
 	log_event("SDMA", (u32)host->data, (u32)host->dma_chan);
@@ -860,6 +991,13 @@ static void bcm2835_sdhost_start_dma(struct bcm2835_host *host)
 	dma_async_issue_pending(host->dma_chan);
 }
 
+/**
+ * bcm2835_sdhost_set_transfer_irqs - configure the interrupt mask for data xfers
+ * @host: pointer to bcm2835_host struct
+ *
+ * Depending on whether DMA is in use, enable/disable data vs block
+ * interrupt types to reduce interrupt traffic.
+ */
 static void bcm2835_sdhost_set_transfer_irqs(struct bcm2835_host *host)
 {
 	u32 all_irqs = SDHCFG_DATA_IRPT_EN | SDHCFG_BLOCK_IRPT_EN |
@@ -875,6 +1013,16 @@ static void bcm2835_sdhost_set_transfer_irqs(struct bcm2835_host *host)
 	bcm2835_sdhost_write(host, host->hcfg, SDHCFG);
 }
 
+/**
+ * bcm2835_sdhost_prepare_data - prepare the data path for a command
+ * @host: pointer to bcm2835_host struct
+ * @cmd: mmc_command that may contain a data transfer (cmd->data)
+ *
+ * Validates transfer sizes and block counts then sets either PIO or
+ * DMA mode depending on the request and available DMA resources.
+ * Prepares scatterlist iterators, configures controller block count
+ * and block size registers.
+ */
 static void bcm2835_sdhost_prepare_data(struct bcm2835_host *host, struct mmc_command *cmd)
 {
 	struct mmc_data *data = cmd->data;
@@ -932,6 +1080,15 @@ static void bcm2835_sdhost_prepare_data(struct bcm2835_host *host, struct mmc_co
 	BUG_ON(!host->data);
 }
 
+/**
+ * bcm2835_sdhost_send_command - send an MMC command to card and start transfer
+ * @host: pointer to bcm2835_host struct
+ * @cmd: mmc_command pointer describing the command and optional data
+ *
+ * Encodes and writes the command register (including response type and
+ * data flags). If data is present, prepares either the PIO or DMA path
+ * before starting the command.
+ */
 bool bcm2835_sdhost_send_command(struct bcm2835_host *host,
 				 struct mmc_command *cmd)
 {
@@ -1072,6 +1229,14 @@ static void bcm2835_sdhost_finish_command(struct bcm2835_host *host,
 					  unsigned long *irq_flags);
 static void bcm2835_sdhost_transfer_complete(struct bcm2835_host *host);
 
+/**
+ * bcm2835_sdhost_finish_data - finish processing a data transfer
+ * @host: pointer to bcm2835_host struct
+ *
+ * Called when a data transfer finishes (PIO or DMA). Clears IRQ enables,
+ * records transferred bytes and either finishes the command or schedules
+ * further processing to complete the request.
+ */
 static void bcm2835_sdhost_finish_data(struct bcm2835_host *host)
 {
 	struct mmc_data *data;
@@ -1105,6 +1270,14 @@ static void bcm2835_sdhost_finish_data(struct bcm2835_host *host)
 	log_event("FDA>", (u32)host->mrq, (u32)host->cmd);
 }
 
+/**
+ * bcm2835_sdhost_transfer_complete - higher-level completion for data
+ * @host: pointer to bcm2835_host struct
+ *
+ * Finishes the transfer for the request: decides whether to issue
+ * a STOP (CMD12) for multi-block transfers, wait for final transfer
+ * completion and schedule finishing tasks.
+ */
 static void bcm2835_sdhost_transfer_complete(struct bcm2835_host *host)
 {
 	struct mmc_data *data;
@@ -1143,6 +1316,15 @@ static void bcm2835_sdhost_transfer_complete(struct bcm2835_host *host)
 
 /* If irq_flags is valid, the caller is in a thread context and is allowed
    to sleep */
+/**
+ * bcm2835_sdhost_finish_command - finalise a command after completion
+ * @host: pointer to bcm2835_host struct
+ * @irq_flags: saved IRQ flags pointer if running with interrupts disabled
+ *
+ * Called after a command completes to get the response, check and clear
+ * error conditions and progress the request lifecycle. If irq_flags is
+ * non-null it may safely sleep; otherwise it runs in IRQ context.
+ */
 static void bcm2835_sdhost_finish_command(struct bcm2835_host *host,
 					  unsigned long *irq_flags)
 {
@@ -1313,6 +1495,13 @@ static void bcm2835_sdhost_finish_command(struct bcm2835_host *host,
 	log_event("FCM>", (u32)host->mrq, (u32)host->cmd);
 }
 
+/**
+ * bcm2835_sdhost_timeout - command timeout handler
+ * @data: host pointer passed as unsigned long
+ *
+ * Called when a command times out waiting for a hardware interrupt.
+ * This will mark the request as timed out and schedule request cleanup.
+ */
 static void bcm2835_sdhost_timeout(unsigned long data)
 {
 	struct bcm2835_host *host;
@@ -1347,6 +1536,15 @@ static void bcm2835_sdhost_timeout(unsigned long data)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+/**
+ * bcm2835_sdhost_busy_irq - process busy interrupts
+ * @host: pointer to bcm2835_host struct
+ * @intmask: interrupt status mask (SDHSTS value)
+ *
+ * Busy interrupt handler for events pertaining to command busy state or
+ * command completion. Handles error detection and signals the command
+ * handling code to proceed or complete.
+ */
 static void bcm2835_sdhost_busy_irq(struct bcm2835_host *host, u32 intmask)
 {
 	log_event("IRQB", (u32)host->cmd, intmask);
@@ -1395,6 +1593,14 @@ static void bcm2835_sdhost_busy_irq(struct bcm2835_host *host, u32 intmask)
 		bcm2835_sdhost_finish_command(host, NULL);
 }
 
+/**
+ * bcm2835_sdhost_data_irq - handle data path interrupts (PIO/DMA)
+ * @host: pointer to bcm2835_host struct
+ * @intmask: interrupt status mask (SDHSTS value)
+ *
+ * Handles any data-related interrupts, including FIFO errors, CRCs,
+ * and triggers PIO handlers or marks completion for DMA transfers.
+ */
 static void bcm2835_sdhost_data_irq(struct bcm2835_host *host, u32 intmask)
 {
 	/* There are no dedicated data/space available interrupt
@@ -1437,6 +1643,14 @@ static void bcm2835_sdhost_data_irq(struct bcm2835_host *host, u32 intmask)
 	}
 }
 
+/**
+ * bcm2835_sdhost_block_irq - handle block completion IRQs
+ * @host: pointer to bcm2835_host struct
+ * @intmask: interrupt status mask (SDHSTS value)
+ *
+ * Called when a block interrupt is signalled; manages block counters
+ * and handles finishing the transfer when appropriate.
+ */
 static void bcm2835_sdhost_block_irq(struct bcm2835_host *host, u32 intmask)
 {
 	log_event("IRQK", (u32)host->data, intmask);
@@ -1475,6 +1689,14 @@ static void bcm2835_sdhost_block_irq(struct bcm2835_host *host, u32 intmask)
 	}
 }
 
+/**
+ * bcm2835_sdhost_irq - main IRQ handler for the SD host controller
+ * @irq: IRQ number
+ * @dev_id: pointer to bcm2835_host instance
+ *
+ * Top-level IRQ handler that reads interrupt status, clears the
+ * interrupt bits and dispatches to busy, block or data handlers.
+ */
 static irqreturn_t bcm2835_sdhost_irq(int irq, void *dev_id)
 {
 	irqreturn_t result = IRQ_NONE;
@@ -1520,6 +1742,14 @@ static irqreturn_t bcm2835_sdhost_irq(int irq, void *dev_id)
 	return result;
 }
 
+/**
+ * bcm2835_sdhost_set_clock - set controller clock and timing parameters
+ * @host: pointer to bcm2835_host struct
+ * @clock: requested frequency in Hz
+ *
+ * Configure the SD host clock divider for both identify and data modes
+ * and update internal timing parameters used for PIO FIFO polling.
+ */
 void bcm2835_sdhost_set_clock(struct bcm2835_host *host, unsigned int clock)
 {
 	int div = 0; /* Initialized for compiler warning */
@@ -1640,6 +1870,14 @@ void bcm2835_sdhost_set_clock(struct bcm2835_host *host, unsigned int clock)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+/**
+ * bcm2835_sdhost_request - entry point for mmc core to start a request
+ * @mmc: the mmc_host instance for this controller
+ * @mrq: the request to process (may include cmd/data/stop/sbc)
+ *
+ * Handles mmc requests, prepares DMA/PIO as needed and schedules
+ * the command for execution.
+ */
 static void bcm2835_sdhost_request(struct mmc_host *mmc, struct mmc_request *mrq)
 {
 	struct bcm2835_host *host;
@@ -1683,7 +1921,7 @@ static void bcm2835_sdhost_request(struct mmc_host *mmc, struct mmc_request *mrq
 	}
 
 	if (host->use_dma && mrq->data &&
-	    (mrq->data->blocks > host->pio_limit))
+	    (mrq->data->blocks > host->pio_limit)) // pio_limit보다 많은 개수의 블록을 사용할 경우 DMA를 사용함.
 		bcm2835_sdhost_prepare_dma(host, mrq->data);
 
 	if (host->reset_clock)
@@ -1740,6 +1978,14 @@ static void bcm2835_sdhost_request(struct mmc_host *mmc, struct mmc_request *mrq
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+/**
+ * bcm2835_sdhost_set_ios - apply host IO settings requested by mmc core
+ * @mmc: the mmc_host instance
+ * @ios: the mmc_ios structure with requested IO settings
+ *
+ * Update the controller's bus width, clock and other related IO
+ * settings. Will call bcm2835_sdhost_set_clock() if the clock changed.
+ */
 static void bcm2835_sdhost_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 
@@ -1783,6 +2029,13 @@ static struct mmc_host_ops bcm2835_sdhost_ops = {
 	.hw_reset = bcm2835_sdhost_reset,
 };
 
+/**
+ * bcm2835_sdhost_cmd_wait_work - workqueue handler for long command waits
+ * @work: work_struct that wraps this instance's host pointer
+ *
+ * Used for cases where a command needs to be waited on but sleeping is
+ * required; this handler will call finish_command() in process context.
+ */
 static void bcm2835_sdhost_cmd_wait_work(struct work_struct *work)
 {
 	struct bcm2835_host *host;
@@ -1812,6 +2065,13 @@ static void bcm2835_sdhost_cmd_wait_work(struct work_struct *work)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+/**
+ * bcm2835_sdhost_tasklet_finish - tasklet invoked to finalise a request
+ * @param: the bcm2835_host pointer passed as an unsigned long
+ *
+ * This runs in softirq context and finalises bsdhost requests, performing
+ * any necessary cleanup and DMA termination.
+ */
 static void bcm2835_sdhost_tasklet_finish(unsigned long param)
 {
 	struct bcm2835_host *host;
@@ -1894,6 +2154,13 @@ static void bcm2835_sdhost_tasklet_finish(unsigned long param)
 	log_event("TSK>", (u32)mrq, 0);
 }
 
+/**
+ * bcm2835_sdhost_add_host - final host initialisation and mmc registration
+ * @host: pointer to bcm2835_host struct
+ *
+ * Configure MMC host capabilities, initialize locks, IRQs, timers and
+ * DMA channel(s) as available. Registers the host with the MMC core.
+ */
 int bcm2835_sdhost_add_host(struct bcm2835_host *host)
 {
 	struct mmc_host *mmc;
@@ -2012,6 +2279,14 @@ untasklet:
 	return ret;
 }
 
+/**
+ * bcm2835_sdhost_probe - platform probe for the BCM2835 SD host
+ * @pdev: platform_device pointer for this driver instance
+ *
+ * Allocates and initialises struct bcm2835_host and associated mmc_host,
+ * maps MMIO resources, requests IRQs, acquires clocks and DMA channels
+ * and registers the mmc host with the mmc core.
+ */
 static int bcm2835_sdhost_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -2157,6 +2432,13 @@ err:
 	return ret;
 }
 
+/**
+ * bcm2835_sdhost_remove - platform remove handler for the SD host
+ * @pdev: platform_device pointer for this driver instance
+ *
+ * Called when the platform device is removed; cleans up host resources,
+ * disables power and IRQs and unregisters the mmc host.
+ */
 static int bcm2835_sdhost_remove(struct platform_device *pdev)
 {
 	struct bcm2835_host *host = platform_get_drvdata(pdev);

@@ -803,6 +803,51 @@ struct dma_device {
 	void (*device_issue_pending)(struct dma_chan *chan);
 };
 
+/**
+ * dmaengine_slave_config - configure runtime parameters for a slave DMA channel
+ * @chan: the DMA channel representing a link between the DMA controller and a
+ *        specific peripheral (i.e., a DMA "slave")
+ * @config: pointer to caller-provided configuration parameters
+ *
+ * Description:
+ *
+ * "Slave" in the DMA engine context refers to a peripheral device that acts
+ * as a source or sink for DMA transfers (for example, an SD controller, UART,
+ * SPI controller, etc.). Unlike mem-to-mem DMA operations, slave transfers
+ * require the DMA engine to be configured with the peripheral's bus address,
+ * transfer width, burst size and optionally a flow-control mode so that the
+ * DMA controller knows how to source or sink data to the device's registers
+ * or FIFO.
+ *
+ * This helper invokes the DMA engine driver's @device_config callback (if
+ * implemented) to apply the provided runtime @config to the channel. Engines
+ * that do not support runtime slave configuration should return -ENOSYS.
+ *
+ * Returns:
+ * On success, returns 0. If the dma device provides a device_config callback
+ * it will be invoked and its return value forwarded. If the callback is
+ * missing, -ENOSYS is returned.
+ *
+ * Typical usage:
+ *  struct dma_slave_config cfg = { 0 };
+ *  cfg.direction = DMA_DEV_TO_MEM;
+ *  cfg.src_addr = host->bus_addr + PERIPH_RDATA; // peripheral physical address
+ *  cfg.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
+ *  cfg.src_maxburst = 16; // burst units are in words of src_addr_width
+ *  ret = dmaengine_slave_config(chan, &cfg);
+ *
+ * Note: The semantics of some fields are device and platform-dependent.
+ * Drivers should either consult platform data or use helpers exposed by the
+ * DMA device to determine the correct values. The 
+ * `is_slave_direction()` helper and `dmaengine_prep_slave_sg` exist to aid
+ * setting up slave transfers.
+ *
+ * (Korean summary)
+ * "Slave"는 DMA 엔진이 데이터를 송수신 하는 주변장치(예: SD 컨트롤러, UART)
+ * 를 의미합니다. 이 함수는 DMA 엔진 드라이버에 채널별 런타임 구성을 전달하여
+ * 전송 방향, 버스트 크기, 주소 폭, 장치 흐름 제어 등을 설정합니다. 성공하면 0을
+ * 반환하고 해당 드라이버의 device_config 콜백을 호출한 결과를 그대로 반환합니다.
+ */
 static inline int dmaengine_slave_config(struct dma_chan *chan,
 					  struct dma_slave_config *config)
 {

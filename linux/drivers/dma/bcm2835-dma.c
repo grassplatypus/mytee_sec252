@@ -339,7 +339,7 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 	for (frame = 0, total_len = 0; frame < frames; d->frames++, frame++) {
 		cb_entry = &d->cb_list[frame];
 		cb_entry->cb = dma_pool_alloc(c->cb_pool, gfp,
-					      &cb_entry->paddr);
+					      &cb_entry->paddr); // CB 공간 할당
 		if (!cb_entry->cb)
 			goto error_cb;
 
@@ -349,7 +349,7 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 		control_block->src = src;
 		control_block->dst = dst;
 		control_block->stride = 0;
-		control_block->next = 0;
+		control_block->next = 0; // 기본적으로 NULL로 초기화
 		/* set up length in control_block if requested */
 		if (buf_len) {
 			/* calculate length honoring period_length */
@@ -364,7 +364,7 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 
 		/* link this the last controlblock */
 		if (frame)
-			d->cb_list[frame - 1].cb->next = cb_entry->paddr;
+			d->cb_list[frame - 1].cb->next = cb_entry->paddr; // 이전 CB와 현재 CB를 연결함.
 
 		/* update src and dst and length */
 		if (src && (info & BCM2835_DMA_S_INC))
@@ -374,6 +374,7 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 
 		/* Length of total transfer */
 		d->size += control_block->length;
+		pr_info("\t[DMA][CB-Chain]src=%p, dst=%p, size=%d\n", src - control_block->length, dst - control_block->length, control_block->length);
 	}
 
 	/* the last frame requires extra flags */
@@ -383,6 +384,7 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 	if (buf_len && (d->size != buf_len))
 		goto error_cb;
 
+	pr_info("[DMA] Created %d CBs.\n", frames);
 	return d;
 error_cb:
 	bcm2835_dma_free_cb_chain(d);
@@ -653,14 +655,14 @@ static struct dma_async_tx_descriptor *bcm2835_dma_prep_slave_sg(
 	enum dma_transfer_direction direction,
 	unsigned long flags, void *context)
 {
-	struct bcm2835_chan *c = to_bcm2835_dma_chan(chan);
+	struct bcm2835_chan *c = to_bcm2835_dma_chan(chan); // 전용 구조체로 변환
 	struct bcm2835_desc *d;
 	dma_addr_t src = 0, dst = 0;
 	u32 info = BCM2835_DMA_WAIT_RESP;
 	u32 extra = BCM2835_DMA_INT_EN;
 	size_t frames;
 
-	if (!is_slave_direction(direction)) {
+	if (!is_slave_direction(direction)) { // 전송 방향 확인
 		dev_err(chan->device->dev,
 			"%s: bad direction?\n", __func__);
 		return NULL;
@@ -682,7 +684,7 @@ static struct dma_async_tx_descriptor *bcm2835_dma_prep_slave_sg(
 	}
 
 	/* count frames in sg list */
-	frames = bcm2835_dma_count_frames_for_sg(c, sgl, sg_len);
+	frames = bcm2835_dma_count_frames_for_sg(c, sgl, sg_len); // 몇개 프레임 필요한지 계산
 
 	/* allocate the CB chain */
 	d = bcm2835_dma_create_cb_chain(chan, direction, false,
@@ -775,7 +777,7 @@ static struct dma_async_tx_descriptor *bcm2835_dma_prep_dma_cyclic(
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 }
 
-static int bcm2835_dma_slave_config(struct dma_chan *chan,
+static int bcm2835_dma_slave_config(struct dma_chan *chan, // DMA 컨트롤러의 device_config
 				    struct dma_slave_config *cfg)
 {
 	struct bcm2835_chan *c = to_bcm2835_dma_chan(chan);

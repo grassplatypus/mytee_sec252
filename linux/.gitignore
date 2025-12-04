@@ -47,13 +47,13 @@ modules.builtin
 #
 /tags
 /TAGS
-/linux
-/vmlinux
-/vmlinux.32
-/vmlinux-gdb.py
-/vmlinuz
-/System.map
-/Module.markers
+# /linux 바이너리도 전송하도록 변경
+# /vmlinux
+# /vmlinux.32
+# /vmlinux-gdb.py
+# /vmlinuz
+# /System.map
+# /Module.markers
 
 #
 # RPM spec file (make rpm-pkg)

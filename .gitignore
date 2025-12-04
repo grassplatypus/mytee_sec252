@@ -1,6 +1,6 @@
 .vs/
 toolchains/
-out/
+# out/
 
 #
 # NOTE! Don't add files that are generated in specific
