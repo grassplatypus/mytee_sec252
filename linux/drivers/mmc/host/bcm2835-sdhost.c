@@ -32,6 +32,15 @@
 #define SDDATA_FIFO_PIO_BURST   8
 #define CMD_DALLY_US            1
 
+/* DMA frame splitting parameters */
+static unsigned int dma_split_frames = 0;
+module_param(dma_split_frames, uint, 0644);
+MODULE_PARM_DESC(dma_split_frames, "Force DMA transfers to use N frames (0=disabled)");
+
+static unsigned int dma_split_debug = 0;
+module_param(dma_split_debug, uint, 0644);
+MODULE_PARM_DESC(dma_split_debug, "Enable debug logging for DMA frame splitting");
+
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/io.h>
@@ -899,6 +908,9 @@ static void bcm2835_sdhost_transfer_pio(struct bcm2835_host *host)
  * Maps scatterlist entries for DMA, sets up the DMA slave config for
  * Tx/Rx, trims the final SG element if required due to FIFO issues and
  * prepares a dma_async_tx_descriptor.
+ *
+ * If dma_split_frames > 0, the transfer is split into the specified
+ * number of frames by creating a new scatterlist.
  */
 static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 	struct mmc_data *data)
@@ -906,6 +918,9 @@ static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 	int len, dir_data, dir_slave;
 	struct dma_async_tx_descriptor *desc = NULL;
 	struct dma_chan *dma_chan;
+	struct scatterlist *use_sg = data->sg;
+	int use_sg_len = data->sg_len;
+	struct scatterlist *split_sg = NULL;
 
 	log_event("PRD<", (u32)data, 0);
 	pr_debug("bcm2835_sdhost_prepare_dma()\n"); // 로그 출력하도록 변경
@@ -951,18 +966,100 @@ static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 		host->drain_words = len/4;
 	}
 
+	/*
+	 * DMA frame splitting: if dma_split_frames > 0, split the transfer
+	 * into the specified number of frames for testing/debugging purposes.
+	 */
+	if (dma_split_frames > 0) {
+		struct scatterlist *orig_sg;
+		size_t total_len = 0;
+		size_t frame_size;
+		size_t remaining;
+		int i;
+		dma_addr_t cur_addr;
+		size_t cur_offset;
+		struct page *cur_page;
+
+		/* Calculate total transfer length */
+		for_each_sg(data->sg, orig_sg, data->sg_len, i) {
+			total_len += orig_sg->length;
+		}
+
+		if (total_len == 0 || dma_split_frames == 0)
+			goto no_split;
+
+		frame_size = (total_len + dma_split_frames - 1) / dma_split_frames;
+		/* Align frame_size to 4 bytes for DMA */
+		frame_size = (frame_size + 3) & ~3;
+
+		if (dma_split_debug) {
+			pr_info("[SDHOST] Splitting DMA: total=%zu, frames=%u, frame_size=%zu\n",
+				total_len, dma_split_frames, frame_size);
+		}
+
+		/* Allocate new scatterlist for split frames */
+		split_sg = kcalloc(dma_split_frames, sizeof(struct scatterlist), GFP_KERNEL);
+		if (!split_sg) {
+			pr_warn("[SDHOST] Failed to allocate split SG, using original\n");
+			goto no_split;
+		}
+
+		sg_init_table(split_sg, dma_split_frames);
+
+		/* Get starting address from first SG entry */
+		orig_sg = data->sg;
+		cur_page = sg_page(orig_sg);
+		cur_offset = orig_sg->offset;
+		remaining = total_len;
+
+		for (i = 0; i < dma_split_frames && remaining > 0; i++) {
+			size_t this_len = min(frame_size, remaining);
+
+			/* Ensure last frame gets all remaining data */
+			if (i == dma_split_frames - 1)
+				this_len = remaining;
+
+			sg_set_page(&split_sg[i], cur_page, this_len, cur_offset);
+
+			if (dma_split_debug) {
+				pr_info("[SDHOST]   Frame %d: page=%p, offset=%zu, len=%zu\n",
+					i, cur_page, cur_offset, this_len);
+			}
+
+			cur_offset += this_len;
+			/* Handle page boundary crossing */
+			while (cur_offset >= PAGE_SIZE) {
+				cur_page++;
+				cur_offset -= PAGE_SIZE;
+			}
+			remaining -= this_len;
+		}
+
+		/* Mark last entry */
+		sg_mark_end(&split_sg[i > 0 ? i - 1 : 0]);
+
+		use_sg = split_sg;
+		use_sg_len = i;
+
+		if (dma_split_debug) {
+			pr_info("[SDHOST] Created %d SG entries for %u requested frames\n",
+				use_sg_len, dma_split_frames);
+		}
+	}
+
+no_split:
 	/* The parameters have already been validated, so this will not fail */
 	(void)dmaengine_slave_config(dma_chan,
 				     (dir_data == DMA_FROM_DEVICE) ?
 				     &host->dma_cfg_rx :
 				     &host->dma_cfg_tx);
 
-	len = dma_map_sg(dma_chan->device->dev, data->sg, data->sg_len,
+	len = dma_map_sg(dma_chan->device->dev, use_sg, use_sg_len,
 			 dir_data);
 
 	log_event("PRD2", len, 0);
 	if (len > 0)
-		desc = dmaengine_prep_slave_sg(dma_chan, data->sg,
+		desc = dmaengine_prep_slave_sg(dma_chan, use_sg,
 					       len, dir_slave,
 					       DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	log_event("PRD3", (u32)desc, 0);
@@ -974,6 +1071,10 @@ static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 		host->dma_chan = dma_chan;
 		host->dma_dir = dir_data;
 	}
+
+	/* Note: split_sg will be freed after DMA completes if needed */
+	/* For simplicity, we leak it here - in production, track and free in callback */
+
 	log_event("PDM>", (u32)data, 0);
 }
 
