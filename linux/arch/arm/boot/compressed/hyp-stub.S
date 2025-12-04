@@ -1620,7 +1620,7 @@ ENTRY(do_write)
 	cmp r2, r4
 	bne 8f
 	ldr r2, =DMA_VIRT_ADDR	@ DMA address (virt addr. in kernel view)
-	ldr r4, =0xfff
+	ldr r4, =0x00000fff
 	and r4, r3, r4
 	add r3, r2, r4		@ update the write address from user virt to kernel virt
 	ldr r5, =0x1		// is user address
