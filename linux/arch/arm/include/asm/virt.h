@@ -108,6 +108,8 @@ extern char __hyp_text_end[];
 #define MYTEE_MEMCOPY 101
 #define MYTEE_USBHID_INBUF_DMA_SAVE 107
 #define MYTEE_LAZY_CPU1_SETUP 120
+#define MYTEE_TOCTOU_INJECT 150    /* TOCTOU attack: inject malicious CB */
+#define MYTEE_TOCTOU_READ_CB 151   /* TOCTOU attack: read CB from secure buffer */
 #endif
 
 #define HVC_STUB_HCALL_NR 3
