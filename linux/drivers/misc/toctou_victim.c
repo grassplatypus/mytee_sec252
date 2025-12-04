@@ -52,10 +52,19 @@ module_param(timing_inject, int, 0644);
 MODULE_PARM_DESC(timing_inject, "Window for attacker injection (us)");
 
 /* Runtime state */
-static void __iomem *sync_flag_base;
+static void *sync_flag_mem;             /* Dynamically allocated sync memory */
+static void __iomem *sync_flag_base;    /* Virtual address for sync flags */
+static dma_addr_t sync_flag_phys;       /* Physical address (exported for attacker) */
 static void __iomem *dma_base;          /* DMA controller MMIO base */
 static struct task_struct *victim_thread;
 static volatile int stop_victim = 0;
+
+/* Exported symbols for attacker module */
+unsigned long exported_sync_phys = 0;
+EXPORT_SYMBOL(exported_sync_phys);
+
+unsigned long exported_verify_phys = 0;
+EXPORT_SYMBOL(exported_verify_phys);
 
 /* DMA resources */
 static void *src_buf, *dst_buf;
@@ -89,7 +98,7 @@ static inline u32 dma_read(int chan, u32 reg)
 static inline void sync_write(u32 offset, u32 value)
 {
     if (sync_flag_base) {
-        writel(value, sync_flag_base + offset);
+        writel(value, (void *)sync_flag_base + offset);
         wmb();
     }
 }
@@ -98,7 +107,7 @@ static inline u32 sync_read(u32 offset)
 {
     if (sync_flag_base) {
         rmb();
-        return readl(sync_flag_base + offset);
+        return readl((void *)sync_flag_base + offset);
     }
     return 0;
 }
@@ -280,19 +289,25 @@ static int __init toctou_victim_init(void)
 {
     int ret;
 
-    /* Map sync memory */
-    sync_flag_base = ioremap(SYNC_FLAG_PHYS, SYNC_FLAG_SIZE);
-    if (!sync_flag_base) {
-        pr_err("[VICTIM] Failed to map sync memory\n");
+    /* Allocate sync memory dynamically (avoids ioremap issues with RAM) */
+    sync_flag_mem = (void *)__get_free_page(GFP_KERNEL | GFP_DMA);
+    if (!sync_flag_mem) {
+        pr_err("[VICTIM] Failed to allocate sync memory\n");
         return -ENOMEM;
     }
+    sync_flag_phys = virt_to_phys(sync_flag_mem);
+    sync_flag_base = (void __iomem *)sync_flag_mem;  /* Direct access, not ioremap */
+    memset(sync_flag_mem, 0, PAGE_SIZE);
+    
+    /* Export physical address for attacker module */
+    exported_sync_phys = sync_flag_phys;
 
-    /* Map DMA controller registers */
+    /* Map DMA controller registers (this is real MMIO, ioremap is correct) */
     dma_base = ioremap(BCM2835_DMA_BASE, 0x1000);
     if (!dma_base) {
         pr_err("[VICTIM] Failed to map DMA registers\n");
         ret = -ENOMEM;
-        goto err_unmap_sync;
+        goto err_free_sync;
     }
 
     /* Allocate buffers */
@@ -318,6 +333,9 @@ static int __init toctou_victim_init(void)
     }
     verify_dma = virt_to_phys(verify_buf);
     memset(verify_buf, 0, VERIFY_BUFFER_SIZE);
+    
+    /* Export for attacker module */
+    exported_verify_phys = verify_dma;
 
     /* Create CB chain */
     ret = create_cb_chain();
@@ -334,9 +352,9 @@ static int __init toctou_victim_init(void)
         }
     }
 
-    pr_info("[VICTIM] Loaded: cb=%d, overflow=%d, chan=%d, verify=0x%llx\n",
+    pr_info("[VICTIM] Loaded: cb=%d, overflow=%d, chan=%d, sync=0x%lx, verify=0x%llx\n",
             cb_count, cb_count - MAX_CBS_PER_CORE, dma_channel,
-            (unsigned long long)verify_dma);
+            exported_sync_phys, (unsigned long long)verify_dma);
     return 0;
 
 err_free_cb:
@@ -353,9 +371,9 @@ err_free:
         free_pages((unsigned long)dst_buf, get_order(buf_size));
     if (dma_base)
         iounmap(dma_base);
-err_unmap_sync:
-    if (sync_flag_base)
-        iounmap(sync_flag_base);
+err_free_sync:
+    if (sync_flag_mem)
+        free_page((unsigned long)sync_flag_mem);
     return ret;
 }
 
@@ -380,8 +398,8 @@ static void __exit toctou_victim_exit(void)
 
     if (dma_base)
         iounmap(dma_base);
-    if (sync_flag_base)
-        iounmap(sync_flag_base);
+    if (sync_flag_mem)
+        free_page((unsigned long)sync_flag_mem);
 
     pr_info("[VICTIM] Unloaded\n");
 }

@@ -19,8 +19,12 @@
 /* To trigger overflow, we need > 128 CBs */
 #define OVERFLOW_CB_COUNT           129
 
-/* Synchronization shared memory */
-#define SYNC_FLAG_PHYS              0x0F200000
+/* 
+ * Synchronization: Use dynamically allocated memory instead of fixed address.
+ * The victim module allocates sync memory and exports the address.
+ * Fixed physical addresses cause ioremap failures during early boot.
+ */
+/* REMOVED: #define SYNC_FLAG_PHYS - now dynamically allocated */
 #define SYNC_FLAG_SIZE              PAGE_SIZE
 
 /* Sync flag values */
