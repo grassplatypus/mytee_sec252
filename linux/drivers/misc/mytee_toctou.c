@@ -11,11 +11,10 @@
  * - After copy, verification reads from the overflowed area
  * - Attacker can inject malicious CB in the timing window
  *
- * Usage:
- *   1. Load driver: insmod mytee_toctou.ko
- *   2. Check status: cat /proc/mytee_toctou
- *   3. Trigger attack: echo "attack" > /proc/mytee_toctou
- *   4. Verify result: cat /proc/mytee_toctou
+ * Usage (built-in driver):
+ *   1. Check status: cat /proc/mytee_toctou
+ *   2. Trigger attack: echo "attack" > /proc/mytee_toctou
+ *   3. Verify result: cat /proc/mytee_toctou
  *
  * Copyright (c) 2024 Security Research
  */
@@ -495,10 +494,11 @@ static void __exit mytee_toctou_exit(void)
     pr_info("[TOCTOU] Driver unloaded\n");
 }
 
-module_init(mytee_toctou_init);
-module_exit(mytee_toctou_exit);
+/* Use late_initcall for built-in driver to ensure system is ready */
+late_initcall(mytee_toctou_init);
 
+/* Built-in drivers don't need module macros, but keep for documentation */
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Security Research");
-MODULE_DESCRIPTION("MyTEE TOCTOU Attack - Using mytee_up_priv API");
+MODULE_DESCRIPTION("MyTEE TOCTOU Attack - Using mytee_up_priv API (built-in)");
 
