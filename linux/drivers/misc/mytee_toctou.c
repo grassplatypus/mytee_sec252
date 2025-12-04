@@ -982,7 +982,8 @@ static int toctou_proc_show(struct seq_file *m, void *v)
     seq_printf(m, "Attack Configuration:\n");
     seq_printf(m, "  Target core: %d\n", attack_state.target_core);
     seq_printf(m, "  Target CB index: %d\n", attack_state.target_cb_index);
-    seq_printf(m, "  Payload phys: 0x%llx\n", (u64)attack_state.payload_phys);
+    seq_printf(m, "  CB Chain: phys=0x%llx\n", (u64)attack_state.cb_chain_phys);
+    seq_printf(m, "  Payload: phys=0x%llx\n", (u64)attack_state.payload_phys);
     seq_printf(m, "  Target phys: 0x%llx\n\n", (u64)attack_state.target_phys);
     
     seq_printf(m, "Attack Results:\n");
