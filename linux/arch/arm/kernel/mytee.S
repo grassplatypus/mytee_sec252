@@ -185,4 +185,15 @@ ENTRY(mytee_get_kernel_phys)
         ret lr
 ENDPROC(mytee_get_kernel_phys)
 
+/* TOCTOU attack: inject malicious destination into CB
+ * r0 = hypercall number (150 = MYTEE_TOCTOU_INJECT)
+ * r1 = secure buffer virtual address
+ * r2 = forbidden destination address (bus format)
+ */
+ENTRY(mytee_toctou_inject)
+	.arch_extension virt
+	__HVC(0)
+	ret lr
+ENDPROC(mytee_toctou_inject)
+
 #endif

