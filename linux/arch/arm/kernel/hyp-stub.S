@@ -1357,10 +1357,10 @@ b 99f
 	
 	// Wait for attacker to complete CB modification
 	ldr	r1, =TOCTOU_SYNC_STATE_ATTACKER_DONE
-toctou_wait_loop:
+77:	// local label for wait loop (avoids redefinition in macro expansion)
 	ldr	r3, [r0]
 	cmp	r3, r1
-	bne	toctou_wait_loop
+	bne	77b
 	
 	// Clear sync flag for next iteration
 	mov	r3, #0
