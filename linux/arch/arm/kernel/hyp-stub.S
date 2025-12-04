@@ -657,10 +657,6 @@ save:
 .LTORG
 
 1:
-#endif
-.LTORG
-
-1:
 #endif	
 
 __hyp_stub_exit:
