@@ -710,6 +710,23 @@ static int do_attack(void)
     u32 cs;
     ktime_t t_start, t_end;
     struct dma_cb *cb;
+    int ret = 0;
+    
+#ifdef CONFIG_MYTEE
+    /*
+     * CRITICAL: Shield the DMA MMIO page NOW to enable Stage 2 trap!
+     * 
+     * The DMA controller MMIO (0x3F007000) is mapped RW by default in ATF.
+     * To trigger the hypervisor trap on DMA register writes, we must
+     * set it to RO using mytee_shield_mmio_with_phys().
+     * 
+     * This is the same mechanism TPM/SPI uses to trigger traps.
+     * Shield only during attack to avoid interfering with other drivers.
+     */
+    pr_info("[TOCTOU] Shielding DMA MMIO (0x%08x) for Stage 2 trap...\n", DMA_BASE_PHYS);
+    mytee_shield_mmio_with_phys(MYTEE_SHIELD_MMIO_WITH_PHYS, DMA_BASE_PHYS, 0, 0x1000);
+    pr_info("[TOCTOU] DMA MMIO shielded - writes will now trigger EL2 trap!\n");
+#endif
     
     pr_info("[TOCTOU] ========================================\n");
     pr_info("[TOCTOU] TOCTOU Attack - Compromised Hypervisor\n");
@@ -916,7 +933,17 @@ static int do_attack(void)
     
     pr_info("[TOCTOU] ========================================\n");
     
-    return 0;
+#ifdef CONFIG_MYTEE
+    /*
+     * Unshield DMA MMIO after attack completes.
+     * This restores normal DMA operation for other drivers.
+     */
+    pr_info("[TOCTOU] Unshielding DMA MMIO...\n");
+    mytee_unshield_mmio_with_phys(MYTEE_UNSHIELD_MMIO_WITH_PHYS, DMA_BASE_PHYS, 0, 0x1000);
+    pr_info("[TOCTOU] DMA MMIO unshielded - normal operation restored.\n");
+#endif
+    
+    return ret;
 }
 
 /*
@@ -1209,21 +1236,13 @@ static int __init mytee_toctou_init(void)
     attack_state.target_cb_index = 0;   /* First CB slot */
     atomic_set(&attack_state.sync_state, SYNC_STATE_IDLE);
     
-#ifdef CONFIG_MYTEE
     /*
-     * CRITICAL: Shield the DMA MMIO page to enable Stage 2 trap!
+     * NOTE: DMA MMIO shield is NOT called here during boot!
+     * Shielding during boot causes crashes because other drivers (e.g., SD host)
+     * also use DMA and would trigger unexpected traps.
      * 
-     * The DMA controller MMIO (0x3F007000) is mapped RW by default in ATF.
-     * To trigger the hypervisor trap on DMA register writes, we must
-     * set it to RO using mytee_shield_mmio_with_phys().
-     * 
-     * This is the same mechanism TPM/SPI uses to trigger traps.
-     * Without this, ioremap writes go directly to hardware without trap!
+     * Shield is called dynamically in do_attack() only when needed.
      */
-    pr_info("[TOCTOU] Shielding DMA MMIO (0x%08x) for Stage 2 trap...\n", DMA_BASE_PHYS);
-    mytee_shield_mmio_with_phys(MYTEE_SHIELD_MMIO_WITH_PHYS, DMA_BASE_PHYS, 0, 0x1000);
-    pr_info("[TOCTOU] DMA MMIO shielded - writes will now trigger EL2 trap!\n");
-#endif
     
     /* Allocate DMA-capable memory for payload */
     attack_state.payload_buf = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
@@ -1282,11 +1301,7 @@ static void __exit mytee_toctou_exit(void)
     wmb();
     msleep(100);
     
-#ifdef CONFIG_MYTEE
-    /* Unshield DMA MMIO before exit */
-    pr_info("[TOCTOU] Unshielding DMA MMIO...\n");
-    mytee_unshield_mmio_with_phys(MYTEE_UNSHIELD_MMIO_WITH_PHYS, DMA_BASE_PHYS, 0, 0x1000);
-#endif
+    /* Note: DMA MMIO unshield is done in do_attack() after attack completes */
     
     if (attack_state.dma_base)
         iounmap(attack_state.dma_base);
