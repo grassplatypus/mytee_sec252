@@ -839,8 +839,8 @@ static int do_attack(void)
     pr_info("[TOCTOU] COMPROMISED hypervisor (our attack):\n");
     pr_info("[TOCTOU]   1. Copy CB to secure buffer\n");
     pr_info("[TOCTOU]   2. Verify CB addresses → PASS\n");
-    pr_info("[TOCTOU]   3. MODIFY CB.dst to 0xC0200000 (kernel .text!)\n");
-    pr_info("[TOCTOU]   4. MODIFY CB.length to 4096 bytes!\n");
+    pr_info("[TOCTOU]   3. MODIFY CB.dst to 0xC0208000 (kernel .text!)\n");
+    pr_info("[TOCTOU]   4. MODIFY CB.length to 4 bytes!\n");
     pr_info("[TOCTOU]   5. Execute DMA → CORRUPTS KERNEL CODE!\n");
     pr_info("[TOCTOU] \n");
     
