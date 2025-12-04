@@ -1027,11 +1027,26 @@ ENDPROC(__hyp_stub_do_trap)
 //Before emulating the write, security verification needs to be performed
 //DMA-filters are implemented here
 
+// DEBUG: Write marker to detect if this trap handler is even reached
+// Write 0xDEAD0001 to TOCTOU_SYNC_FLAG_VIRT to signal trap occurred
+push	{r4, lr}
+ldr	r4, =TOCTOU_SYNC_FLAG_VIRT
+ldr	lr, =0xDEAD0001
+str	lr, [r4]
+pop	{r4, lr}
+
 // TOCTOU ATTACK FIX: Check if this is DMA CONBLK_AD write (kernel or user)
 // and force external DMA handling (label 199) for ALL DMA writes
 and r4, r3, #0x0000000f		// Get offset within DMA channel
 cmp r4, #0x4			// offset 0x4 = CONBLK_AD register
 bne 299f			// Not CONBLK_AD, continue normal flow
+
+// DEBUG: Write marker for DMA CONBLK_AD detection
+push	{r4, lr}
+ldr	r4, =TOCTOU_SYNC_FLAG_VIRT
+ldr	lr, =0xDEAD0002
+str	lr, [r4]
+pop	{r4, lr}
 
 // Check if physical address is DMA MMIO (0x3F007XXX)
 mrc	p15, 4, r4, c6, c0, 4	// Read HPFAR

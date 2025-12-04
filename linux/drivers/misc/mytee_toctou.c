@@ -1094,6 +1094,83 @@ static ssize_t toctou_proc_write(struct file *file, const char __user *buffer,
             attack_state.target_cb_index = val;
             pr_info("[TOCTOU] Target CB index set to %d\n", val);
         }
+    } else if (strcmp(cmd, "debug") == 0) {
+        /* Check debug marker written by hypervisor trap handler */
+        u32 marker = 0;
+        void __iomem *sync_addr;
+        
+        pr_info("[TOCTOU] === DEBUG: Checking hypervisor trap marker ===\n");
+        
+#ifdef CONFIG_MYTEE
+        mytee_up_priv(MYTEE_UP_PRIV, 0, 0, 0);
+        
+        sync_addr = (void __iomem *)TOCTOU_SYNC_FLAG_VIRT;
+        marker = readl(sync_addr);
+        
+        pr_info("[TOCTOU] Sync flag address: 0x%08x\n", TOCTOU_SYNC_FLAG_VIRT);
+        pr_info("[TOCTOU] Current marker value: 0x%08x\n", marker);
+        
+        if (marker == 0xDEAD0001) {
+            pr_info("[TOCTOU] *** TRAP HANDLER REACHED! ***\n");
+            pr_info("[TOCTOU] emul_write was invoked successfully.\n");
+        } else if (marker == 0xDEAD0002) {
+            pr_info("[TOCTOU] *** DMA CONBLK_AD WRITE DETECTED! ***\n");
+            pr_info("[TOCTOU] emul_write detected CONBLK_AD offset.\n");
+        } else if (marker == TOCTOU_SYNC_STATE_ATTACKER_DONE) {
+            pr_info("[TOCTOU] Marker shows ATTACKER_DONE (0x%08x)\n", marker);
+        } else if (marker == 0) {
+            pr_info("[TOCTOU] Marker is ZERO - trap NOT triggered!\n");
+            pr_info("[TOCTOU] Possible causes:\n");
+            pr_info("[TOCTOU]   1. ioremap access doesn't cause Stage 2 trap\n");
+            pr_info("[TOCTOU]   2. DMA page not mapped as RO in Stage 2\n");
+            pr_info("[TOCTOU]   3. Wrong DMA channel address\n");
+        } else {
+            pr_info("[TOCTOU] Unknown marker: 0x%08x\n", marker);
+        }
+        
+        /* Clear marker for next test */
+        writel(0, sync_addr);
+        wmb();
+        pr_info("[TOCTOU] Marker cleared.\n");
+        
+        mytee_down_priv(MYTEE_DOWN_PRIV, 0);
+#else
+        pr_info("[TOCTOU] CONFIG_MYTEE not enabled!\n");
+#endif
+    } else if (strcmp(cmd, "testdma") == 0) {
+        /* Test if DMA register write triggers trap */
+        void __iomem *dma_base;
+        void __iomem *chan5_base;
+        u32 old_cs, new_cs;
+        
+        pr_info("[TOCTOU] === TEST: DMA register write ===\n");
+        
+        dma_base = ioremap(DMA_BASE_PHYS, 0x1000);
+        if (!dma_base) {
+            pr_err("[TOCTOU] Failed to ioremap DMA base\n");
+        } else {
+            chan5_base = dma_base + 0x500;  /* Channel 5 */
+            
+            pr_info("[TOCTOU] DMA base: 0x3F007000 -> %p\n", dma_base);
+            pr_info("[TOCTOU] Channel 5 base: 0x3F007500 -> %p\n", chan5_base);
+            
+            /* Read current CS */
+            old_cs = readl(chan5_base + DMA_CS);
+            pr_info("[TOCTOU] Channel 5 CS (before): 0x%08x\n", old_cs);
+            
+            /* Try write to CONBLK_AD - this should trigger trap! */
+            pr_info("[TOCTOU] Writing 0x12345678 to CONBLK_AD (0x3F007504)...\n");
+            writel(0x12345678, chan5_base + DMA_CONBLK_AD);
+            wmb();
+            
+            /* Read back */
+            new_cs = readl(chan5_base + DMA_CS);
+            pr_info("[TOCTOU] Channel 5 CS (after): 0x%08x\n", new_cs);
+            
+            iounmap(dma_base);
+            
+            pr_info("[TOCTOU] DMA test complete. Run 'debug' to check trap marker.\n");
+        }
     } else {
         pr_info("[TOCTOU] Unknown command: %s\n", cmd);
     }
@@ -1131,6 +1208,22 @@ static int __init mytee_toctou_init(void)
     attack_state.target_core = 1;       /* Attack Core 1's buffer */
     attack_state.target_cb_index = 0;   /* First CB slot */
     atomic_set(&attack_state.sync_state, SYNC_STATE_IDLE);
+    
+#ifdef CONFIG_MYTEE
+    /*
+     * CRITICAL: Shield the DMA MMIO page to enable Stage 2 trap!
+     * 
+     * The DMA controller MMIO (0x3F007000) is mapped RW by default in ATF.
+     * To trigger the hypervisor trap on DMA register writes, we must
+     * set it to RO using mytee_shield_mmio_with_phys().
+     * 
+     * This is the same mechanism TPM/SPI uses to trigger traps.
+     * Without this, ioremap writes go directly to hardware without trap!
+     */
+    pr_info("[TOCTOU] Shielding DMA MMIO (0x%08x) for Stage 2 trap...\n", DMA_BASE_PHYS);
+    mytee_shield_mmio_with_phys(MYTEE_SHIELD_MMIO_WITH_PHYS, DMA_BASE_PHYS, 0, 0x1000);
+    pr_info("[TOCTOU] DMA MMIO shielded - writes will now trigger EL2 trap!\n");
+#endif
     
     /* Allocate DMA-capable memory for payload */
     attack_state.payload_buf = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
@@ -1188,6 +1281,12 @@ static void __exit mytee_toctou_exit(void)
     attack_state.stop_threads = 1;
     wmb();
     msleep(100);
+    
+#ifdef CONFIG_MYTEE
+    /* Unshield DMA MMIO before exit */
+    pr_info("[TOCTOU] Unshielding DMA MMIO...\n");
+    mytee_unshield_mmio_with_phys(MYTEE_UNSHIELD_MMIO_WITH_PHYS, DMA_BASE_PHYS, 0, 0x1000);
+#endif
     
     if (attack_state.dma_base)
         iounmap(attack_state.dma_base);
