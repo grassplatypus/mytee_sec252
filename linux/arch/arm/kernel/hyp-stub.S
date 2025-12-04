@@ -1353,33 +1353,57 @@ b 99f
 	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address from first 
 			// DMA CB address bus address(which be mapped to bcm2835 dma phys address 0x3f007000)
 
-	// ========== TOCTOU SYNC START ==========
-	// Save r2 (secure buffer bus addr) before sync
-	push	{r2, lr}
+	// ========== TOCTOU VULNERABILITY WINDOW ==========
+	// This intentional delay demonstrates the TOCTOU vulnerability.
+	// After verification passes, we wait before allowing DMA execution.
+	// During this window, an attacker with EL2 privilege can modify
+	// the CB in secure buffer to point to a forbidden destination.
+	//
+	// In real attack: attacker on another core polls for this window
+	// Here: we use a fixed delay to guarantee the window is open
 	
-	// Signal attacker: verification complete, ready for modification
+	push	{r0, r1, r2, r3, lr}
+	
+	// Signal that verification is complete (for attacker polling)
 	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
 	ldr	r1, =TOCTOU_SYNC_STATE_HYP_READY
 	str	r1, [r0]
-	dmb				// Data Memory Barrier - ensure write is visible
-	dsb				// Data Synchronization Barrier
+	dmb
+	dsb
 	
-	// Wait for attacker to complete CB modification
+	// *** INTENTIONAL DELAY - TOCTOU WINDOW ***
+	// Wait ~100ms (at ~1GHz, ~100M cycles, but we use smaller loop)
+	// This gives attacker plenty of time to modify CB
+	ldr	r3, =0x00100000		// ~1M iterations = ~10-50ms
+78:
+	subs	r3, r3, #1
+	bne	78b
+	
+	// Check if attacker modified the flag (optional early exit)
+	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
 	ldr	r1, =TOCTOU_SYNC_STATE_ATTACKER_DONE
-77:	// local label for wait loop (avoids redefinition in macro expansion)
 	ldr	r3, [r0]
 	cmp	r3, r1
-	bne	77b
+	beq	79f			// Attacker done, exit early
 	
-	// Clear sync flag for next iteration
+	// Extra wait if attacker still working
+	ldr	r3, =0x00080000		// Additional ~500K iterations
+78:
+	subs	r3, r3, #1
+	bne	78b
+
+79:	// Attacker done or timeout
+	// Clear sync flag
+	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
 	mov	r3, #0
 	str	r3, [r0]
 	dmb
 	dsb
 	
-	// Restore r2
-	pop	{r2, lr}
-	// ========== TOCTOU SYNC END ==========
+	pop	{r0, r1, r2, r3, lr}
+	// ========== TOCTOU WINDOW END ==========
+	// At this point, CB in secure buffer may have been modified!
+	// DMA will execute with potentially malicious destination
 
 	b	200f
 214:	// load saved context to r2	(verify skip)
