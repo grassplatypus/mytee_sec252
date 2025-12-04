@@ -44,6 +44,11 @@
 #include <asm/virt.h>
 #endif
 
+/* HVC number for TOCTOU injection (in case virt.h doesn't define it) */
+#ifndef MYTEE_TOCTOU_INJECT
+#define MYTEE_TOCTOU_INJECT 150
+#endif
+
 /* External function defined in mytee.S for HVC call */
 extern void mytee_toctou_inject(u32 hypercall, u32 secure_buf_addr, u32 forbidden_dst, u32 dummy);
 
