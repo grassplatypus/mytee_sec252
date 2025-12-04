@@ -85,6 +85,11 @@
 #define VALUE_REQUEST_LED 0x2000921
 #define OFFSET_4KB 0x1000
 
+/* TOCTOU Attack Synchronization - shared memory handshake addresses */
+#define TOCTOU_SYNC_FLAG_VIRT 0x8F200000
+#define TOCTOU_SYNC_STATE_HYP_READY 0xDEAD0001
+#define TOCTOU_SYNC_STATE_ATTACKER_DONE 0xDEAD0002
+
 #define MYTEE_COPY_CONTROL_BLOCKS_IN_USER 116
 #endif
 
@@ -1338,6 +1343,35 @@ b 99f
 	ldr	r2, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
 	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address from first 
 			// DMA CB address bus address(which be mapped to bcm2835 dma phys address 0x3f007000)
+
+	// ========== TOCTOU SYNC START ==========
+	// Save r2 (secure buffer bus addr) before sync
+	push	{r2, lr}
+	
+	// Signal attacker: verification complete, ready for modification
+	ldr	r0, =TOCTOU_SYNC_FLAG_VIRT
+	ldr	r1, =TOCTOU_SYNC_STATE_HYP_READY
+	str	r1, [r0]
+	dmb				// Data Memory Barrier - ensure write is visible
+	dsb				// Data Synchronization Barrier
+	
+	// Wait for attacker to complete CB modification
+	ldr	r1, =TOCTOU_SYNC_STATE_ATTACKER_DONE
+77:	// local label for wait loop (avoids redefinition in macro expansion)
+	ldr	r3, [r0]
+	cmp	r3, r1
+	bne	77b
+	
+	// Clear sync flag for next iteration
+	mov	r3, #0
+	str	r3, [r0]
+	dmb
+	dsb
+	
+	// Restore r2
+	pop	{r2, lr}
+	// ========== TOCTOU SYNC END ==========
+
 	b	200f
 214:	// load saved context to r2	(verify skip)
 	ldr	r2, [sp, #MYTEE_SP_OFFSET_CONTEXT_X2]
