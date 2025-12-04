@@ -1132,11 +1132,19 @@ b 99f
 	
 	str	r0, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
 	
-	ldr	r0, =DMA_VIRT_ADDR	// check DMA address
+	// TOCTOU: Use physical address from HPFAR instead of virtual address
+	// HPFAR[31:4] contains IPA[39:12], need to shift left by 8
+	mrc	p15, 4, r8, c6, c0, 4	// Read HPFAR (Hypervisor Physical Fault Address Register)
+	lsl	r8, r8, #8		// HPFAR[31:4] << 8 = IPA[39:12] -> phys addr (upper bits)
+	and	r6, r3, #0xFFF		// Get lower 12 bits from virtual address (page offset)
+	orr	r8, r8, r6		// Combine to get full physical address
+
+	// Check if physical address matches DMA MMIO (0x3F007000)
+	ldr	r0, =MYTEE_DMA_MMIO_ADDRESS_PHYS	// 0x3F007000
 	ldr	r6, =0xFFFFF000
-	and	r8, r3, r6
-	cmp	r8, r0
-	bne	214f			
+	and	r7, r8, r6		// Mask page offset
+	cmp	r7, r0
+	bne	214f			// Skip if not DMA MMIO physical address
 	
 	and	r0, r3, #0x0000000f	// check request cs(control and status => offset 0x0) or cblock(control block => offset 0x4)
 	cmp	r0, #0x4
