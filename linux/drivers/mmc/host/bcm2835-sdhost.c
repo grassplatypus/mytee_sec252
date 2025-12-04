@@ -908,7 +908,7 @@ static void bcm2835_sdhost_prepare_dma(struct bcm2835_host *host,
 	struct dma_chan *dma_chan;
 
 	log_event("PRD<", (u32)data, 0);
-	pr_info("bcm2835_sdhost_prepare_dma()\n"); // 로그 출력하도록 변경
+	pr_debug("bcm2835_sdhost_prepare_dma()\n"); // 로그 출력하도록 변경
 
 	dma_chan = host->dma_chan_rxtx;
 	if (data->flags & MMC_DATA_READ) {

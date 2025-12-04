@@ -50,6 +50,9 @@
 #define BCM2835_DMA_MAX_DMA_CHAN_SUPPORTED 14
 #define BCM2835_DMA_CHAN_NAME_SIZE 8
 #define BCM2835_DMA_BULK_MASK  BIT(0)
+static bool dma_debug_log = false;
+module_param(dma_debug_log, bool, 0644);
+MODULE_PARM_DESC(dma_debug_log, "Enable DMA src/dst logging");
 
 struct bcm2835_dmadev {
 	struct dma_device ddev;
@@ -374,7 +377,9 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 
 		/* Length of total transfer */
 		d->size += control_block->length;
-		pr_info("\t[DMA][CB-Chain]src=%p, dst=%p, size=%d\n", src - control_block->length, dst - control_block->length, control_block->length);
+		if (dma_debug_log)
+			pr_info("\t[DMA][CB-Chain]src=%p, dst=%p, size=%d\n", control_block->src, 
+				control_block->dst, control_block->length);
 	}
 
 	/* the last frame requires extra flags */
@@ -383,8 +388,8 @@ static struct bcm2835_desc *bcm2835_dma_create_cb_chain(
 	/* detect a size missmatch */
 	if (buf_len && (d->size != buf_len))
 		goto error_cb;
-
-	pr_info("[DMA] Created %d CBs.\n", frames);
+	if (dma_debug_log)
+		pr_info("[DMA] Created %d CBs.\n", frames);
 	return d;
 error_cb:
 	bcm2835_dma_free_cb_chain(d);
