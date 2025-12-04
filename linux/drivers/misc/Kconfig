@@ -514,6 +514,29 @@ config PCI_ENDPOINT_TEST
            Enable this configuration option to enable the host side test driver
            for PCI Endpoint.
 
+config TOCTOU_ATTACK
+	tristate "MyTEE TOCTOU Attack PoC modules"
+	depends on ARCH_BCM2835
+	default y
+	help
+	  Proof-of-concept modules demonstrating TOCTOU (Time-Of-Check
+	  Time-Of-Use) vulnerability in MyTEE's DMA secure buffer.
+	  
+	  The attack exploits the lack of boundary checking when copying
+	  DMA control blocks to the per-core secure buffer. When more than
+	  128 control blocks are requested, they overflow into the next
+	  core's buffer, allowing that core to inject malicious CBs.
+	  
+	  This creates two modules:
+	    - toctou_victim: Runs on Core 0, triggers buffer overflow
+	    - toctou_attacker: Runs on Core 1, injects malicious CBs
+	  
+	  WARNING: This is for security research only!
+	  
+	  To compile as built-in, say Y.
+	  To compile as modules, say M.
+	  If unsure, say N.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
