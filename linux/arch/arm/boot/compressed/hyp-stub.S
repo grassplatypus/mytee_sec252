@@ -908,28 +908,26 @@ ENDPROC(__hyp_stub_do_trap)
 .endm
 
 .macro copy_user_cb origVal
-	ldr r4, =0x0
-	cmp r5, r4
-	beq 47f		// Kernel address
+	// TOCTOU ATTACK: Force DMA verification for ALL addresses (kernel & user)
+	// Original code skipped verification for kernel addresses (r5==0)
+	// Now we check if this is a DMA CONBLK_AD write and always verify
 	
-	and r0, r3, #0x0000000f	// check whether the request is CS (control and status => offset 0x0) or cblock(control block => offset 0x4)
-	cmp r0, #0x4
-	bne 47f
+	and r0, r3, #0x0000000f	// check whether the request is CS or CONBLK_AD
+	cmp r0, #0x4		// offset 0x4 = CONBLK_AD register
+	bne 47f			// Not CONBLK_AD, skip CB copy
 	
-	ldr r0, =MYTEE_COPY_CONTROL_BLOCKS_IN_USER		// Call monitor to copy control blocks in user space to kernel space
+	// Check if this is DMA MMIO by checking physical address
+	// Use HPFAR to get physical address
+	mrc	p15, 4, r0, c6, c0, 4	// Read HPFAR
+	lsl	r0, r0, #8		// Get physical page address
+	ldr	r4, =0xFFFFF000
+	and	r0, r0, r4
+	ldr	r4, =MYTEE_DMA_MMIO_ADDRESS_PHYS	// 0x3F007000
+	cmp	r0, r4
+	bne	47f			// Not DMA MMIO, skip
 	
-	sub r4, \origVal, #MYTEE_PHYS_TO_VIRT_OFFSET		// Physical address of cb
-		
-	mov 	r2, #OFFSET_4KB
-	mrc     p15, 0, lr, c0, c0, 5              @ get processor id:MPIDR
-	and	lr, lr, #0xf
-	mul	r2, r2, lr
-	ldr	lr, =SECURE_BUFFER_BASE_VIRT             // Secure buffer base addr
-	add	r2, r2, lr
-	
-	.arch_extension sec
-        smc #2		// Monitor will copy control blocks in user space [r4] to the hypervisor space [r2]
-	ldr	r0, =0x1	// Control blocks are already copied, set up the flag
+	// This is a DMA CONBLK_AD write! Set flag for external DMA handling
+	ldr	r0, =0x1	// Flag: need to go through label 199 (external DMA)
 	b	48f
 47:
 	ldr	r0, =0x0
@@ -1029,6 +1027,37 @@ ENDPROC(__hyp_stub_do_trap)
 //Before emulating the write, security verification needs to be performed
 //DMA-filters are implemented here
 
+// DEBUG: Write marker to detect if this trap handler is even reached
+// Write 0xDEAD0001 to TOCTOU_SYNC_FLAG_VIRT to signal trap occurred
+push	{r4, lr}
+ldr	r4, =TOCTOU_SYNC_FLAG_VIRT
+ldr	lr, =0xDEAD0001
+str	lr, [r4]
+pop	{r4, lr}
+
+// TOCTOU ATTACK FIX: Check if this is DMA CONBLK_AD write (kernel or user)
+// and force external DMA handling (label 199) for ALL DMA writes
+and r4, r3, #0x0000000f		// Get offset within DMA channel
+cmp r4, #0x4			// offset 0x4 = CONBLK_AD register
+bne 299f			// Not CONBLK_AD, continue normal flow
+
+// DEBUG: Write marker for DMA CONBLK_AD detection
+push	{r4, lr}
+ldr	r4, =TOCTOU_SYNC_FLAG_VIRT
+ldr	lr, =0xDEAD0002
+str	lr, [r4]
+pop	{r4, lr}
+
+// Check if physical address is DMA MMIO (0x3F007XXX)
+mrc	p15, 4, r4, c6, c0, 4	// Read HPFAR
+lsl	r4, r4, #8		// Get physical page address
+ldr	lr, =0xFFFFF000
+and	r4, r4, lr
+ldr	lr, =MYTEE_DMA_MMIO_ADDRESS_PHYS	// 0x3F007000
+cmp	r4, lr
+beq	199f			// This IS DMA MMIO! Go to external DMA handling!
+
+299:
 //@ Filetering case 1: USB-DMA handling
 
 //For USB-DMA packet fileter, MMIO virt address: 0xF09805XX
