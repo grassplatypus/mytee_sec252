@@ -514,27 +514,29 @@ config PCI_ENDPOINT_TEST
            Enable this configuration option to enable the host side test driver
            for PCI Endpoint.
 
-config TOCTOU_ATTACK
-	tristate "MyTEE TOCTOU Attack PoC modules"
-	depends on ARCH_BCM2835
-	default y
+config MYTEE_TOCTOU_ATTACK
+	tristate "MyTEE TOCTOU Attack Driver"
+	depends on MYTEE
+	default m
 	help
-	  Proof-of-concept modules demonstrating TOCTOU (Time-Of-Check
-	  Time-Of-Use) vulnerability in MyTEE's DMA secure buffer.
+	  Kernel driver for demonstrating TOCTOU vulnerability in MyTEE's
+	  DMA secure buffer.
 	  
-	  The attack exploits the lack of boundary checking when copying
-	  DMA control blocks to the per-core secure buffer. When more than
-	  128 control blocks are requested, they overflow into the next
-	  core's buffer, allowing that core to inject malicious CBs.
+	  The driver uses mytee_up_priv()/mytee_down_priv() API to gain
+	  EL2 privilege and directly access the secure buffer region.
 	  
-	  This creates two modules:
-	    - toctou_victim: Runs on Core 0, triggers buffer overflow
-	    - toctou_attacker: Runs on Core 1, injects malicious CBs
+	  Usage:
+	    insmod mytee_toctou.ko
+	    cat /proc/mytee_toctou
+	    echo attack > /proc/mytee_toctou
 	  
-	  WARNING: This is for security research only!
+	  This exploits the lack of boundary checking in hyp-stub.S
+	  CB copy loop (label 201b), where CB chains with >128 entries
+	  overflow into adjacent core's buffer region.
 	  
-	  To compile as built-in, say Y.
-	  To compile as modules, say M.
+	  WARNING: Security research only!
+	  
+	  To compile as a module, say M.
 	  If unsure, say N.
 
 source "drivers/misc/c2port/Kconfig"

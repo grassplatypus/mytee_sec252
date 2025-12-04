@@ -655,6 +655,11 @@ save:
 	str	r1, [r0]
 	__ERET
 .LTORG
+
+1:
+#endif
+.LTORG
+
 1:
 #endif	
 
