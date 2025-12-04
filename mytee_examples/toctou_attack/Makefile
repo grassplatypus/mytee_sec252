@@ -3,7 +3,7 @@
 obj-m += toctou_attacker.o
 obj-m += toctou_victim.o
 
-KDIR ?= /home/grassplatypus/mytee_sec252/linux
+KDIR ?= /home/dreams200260/mytee_sec252/linux
 PWD := $(shell pwd)
 
 # Cross-compile for ARM
