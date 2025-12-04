@@ -1,6 +1,6 @@
 include ../../config.mk
 
-CC = $(CROSS_COMPILE)gcc
+CC := $(CROSS_COMPILE)gcc
 CFLAGS = -Wall -O2
 TARGET = toctou_test
 
