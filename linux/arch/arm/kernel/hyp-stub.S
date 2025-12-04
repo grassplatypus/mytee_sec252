@@ -1136,7 +1136,8 @@ b 99f
 	// HPFAR[31:4] contains IPA[39:12], need to shift left by 8
 	mrc	p15, 4, r8, c6, c0, 4	// Read HPFAR (Hypervisor Physical Fault Address Register)
 	lsl	r8, r8, #8		// HPFAR[31:4] << 8 = IPA[39:12] -> phys addr (upper bits)
-	and	r6, r3, #0x00000FFF		// Get lower 12 bits from virtual address (page offset)
+	ldr	r6, =0xFFF		// Page offset mask (12 bits) - can't use immediate
+	and	r6, r3, r6		// Get lower 12 bits from virtual address (page offset)
 	orr	r8, r8, r6		// Combine to get full physical address
 
 	// Check if physical address matches DMA MMIO (0x3F007000)
