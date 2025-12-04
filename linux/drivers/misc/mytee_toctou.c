@@ -53,7 +53,7 @@
 extern void mytee_toctou_inject(u32 hypercall, u32 secure_buf_addr, u32 forbidden_dst, u32 dummy);
 
 #define DRIVER_NAME "mytee_toctou"
-#define PROC_NAME "mytee_toctou"
+#define PROC_NAME "mytee_toctou" 
 
 /* Secure buffer constants (from hyp-stub.S) */
 #define SECURE_BUFFER_BASE_VIRT     0x8F1FB000
