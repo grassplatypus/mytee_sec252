@@ -32,15 +32,6 @@
 #define SDDATA_FIFO_PIO_BURST   8
 #define CMD_DALLY_US            1
 
-/* DMA frame splitting parameters */
-static unsigned int dma_split_frames = 0;
-module_param(dma_split_frames, uint, 0644);
-MODULE_PARM_DESC(dma_split_frames, "Force DMA transfers to use N frames (0=disabled)");
-
-static unsigned int dma_split_debug = 0;
-module_param(dma_split_debug, uint, 0644);
-MODULE_PARM_DESC(dma_split_debug, "Enable debug logging for DMA frame splitting");
-
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/io.h>
@@ -152,6 +143,15 @@ MODULE_PARM_DESC(dma_split_debug, "Enable debug logging for DMA frame splitting"
 
 #define MHZ 1000000
 
+
+/* DMA frame splitting parameters */
+static unsigned int dma_split_frames = 0;
+module_param(dma_split_frames, uint, 0644);
+MODULE_PARM_DESC(dma_split_frames, "Force DMA transfers to use N frames (0=disabled)");
+
+static unsigned int dma_split_debug = 0;
+module_param(dma_split_debug, uint, 0644);
+MODULE_PARM_DESC(dma_split_debug, "Enable debug logging for DMA frame splitting");
 
 struct bcm2835_host {
 	spinlock_t		lock;
