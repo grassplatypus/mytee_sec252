@@ -1136,7 +1136,7 @@ b 99f
 	// HPFAR[31:4] contains IPA[39:12], need to shift left by 8
 	mrc	p15, 4, r8, c6, c0, 4	// Read HPFAR (Hypervisor Physical Fault Address Register)
 	lsl	r8, r8, #8		// HPFAR[31:4] << 8 = IPA[39:12] -> phys addr (upper bits)
-	and	r6, r3, #0xFFF		// Get lower 12 bits from virtual address (page offset)
+	and	r6, r3, #0x00000FFF		// Get lower 12 bits from virtual address (page offset)
 	orr	r8, r8, r6		// Combine to get full physical address
 
 	// Check if physical address matches DMA MMIO (0x3F007000)
@@ -1595,7 +1595,7 @@ ENTRY(do_write)
 	cmp r2, r4
 	bne 8f
 	ldr r2, =DMA_VIRT_ADDR	@ DMA address (virt addr. in kernel view)
-	ldr r4, =0xfff
+	ldr r4, =0x00000fff
 	and r4, r3, r4
 	add r3, r2, r4		@ update the write address from user virt to kernel virt
 	ldr r5, =0x1		// is user address
